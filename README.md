@@ -11,6 +11,34 @@ This package is meant for a fresh system: unpack it, optionally edit `config/`, 
 - `config/`: the source of all editable shell, template, GDB, tmux, and MCP configuration.
 - `state/`: reports written by the scripts.
 
+## WSL basics
+
+List Linux distributions available online:
+
+```powershell
+wsl --list --online
+```
+
+Install one distribution, for example Kali Linux:
+
+```powershell
+wsl --install -d kali-linux
+```
+
+Docker Desktop can install and manage its own Docker WSL distributions automatically. After installing Docker Desktop, you may see Docker entries in the WSL list.
+
+Show installed WSL distributions and their versions/status:
+
+```powershell
+wsl -l -v
+```
+
+Set the default WSL distribution, for example Kali Linux:
+
+```powershell
+wsl --set-default kali-linux
+```
+
 ## Quick start
 
 ```bash
