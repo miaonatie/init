@@ -1,13 +1,12 @@
-# Windows idalib-mcp workflow
+# IDA MCP on Windows
 
-WSL/Codex is configured to connect to:
+WSL/Codex connects to:
 
-```toml
-[mcp_servers.ida]
-url = "http://127.0.0.1:13337/mcp"
+```text
+http://127.0.0.1:13337/mcp
 ```
 
-Windows PowerShell example:
+PowerShell example:
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"

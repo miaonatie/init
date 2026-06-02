@@ -1,48 +1,13 @@
-# init
+# init v2
 
-Portable WSL / Kali / Debian / Ubuntu CTF pwn environment initializer.
+Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
 
-This package is meant for a fresh system: unpack it, optionally edit `config/`, then run the installer once. Configuration stays inside this package directory and is applied through short source hooks.
-
-## Files
-
-- `init-install.py`: one-shot software installer. Default is full install; use `--menu` for interactive selection.
-- `init-config.py`: config applier/cleaner. It does not install software; it only wires `./config/` into bash/zsh/GDB/tmux/Codex.
-- `config/`: the source of all editable shell, template, GDB, tmux, and MCP configuration.
-- `state/`: reports written by the scripts.
-
-## WSL basics
-
-List Linux distributions available online:
-
-```powershell
-wsl --list --online
-```
-
-Install one distribution, for example Kali Linux:
-
-```powershell
-wsl --install -d kali-linux
-```
-
-Docker Desktop can install and manage its own Docker WSL distributions automatically. After installing Docker Desktop, you may see Docker entries in the WSL list.
-
-Show installed WSL distributions and their versions/status:
-
-```powershell
-wsl -l -v
-```
-
-Set the default WSL distribution, for example Kali Linux:
-
-```powershell
-wsl --set-default kali-linux
-```
+Unpack the package, optionally edit `config/`, then run the installer. The configuration source stays inside this directory; short hooks load it from your shell, GDB, tmux, and Codex config.
 
 ## Quick start
 
 ```bash
-cd init
+cd init-v2
 python3 init-install.py
 ```
 
@@ -52,83 +17,98 @@ Interactive install:
 python3 init-install.py --menu
 ```
 
-Install software only, without applying config:
-
-```bash
-python3 init-install.py --no-config
-```
-
 Apply config only:
 
 ```bash
 python3 init-config.py
 ```
 
-Clean init hooks without uninstalling software:
+Check status:
+
+```bash
+python3 init-install.py --test
+# or config only
+python3 init-config.py --test
+```
+
+Clean hooks without uninstalling software:
 
 ```bash
 python3 init-config.py clean
 ```
 
-Show editable paths:
+## Files
+
+```text
+init-v2/
+├── init-install.py      # software installer
+├── init-config.py       # config applier / cleaner
+├── config/              # editable source config
+└── state/               # reports generated after running
+```
+
+`config/` contains:
+
+```text
+shell.sh                 # PATH, zsh helper, aliases
+pwnnew.sh                # create pwn workspaces
+gdbinit                  # GDB defaults
+tmux.conf                # tmux defaults
+templates/payload.py     # default pwntools payload
+templates/AGENTS.md      # workspace notes for AI assistants
+mcp/codex-ida.toml       # Codex IDA MCP block
+mcp/ida-mcp-windows.md   # Windows-side IDA MCP notes
+```
+
+## Editing
+
+Most edits take effect without rerunning `init-config.py`:
+
+- `config/shell.sh`: open a new terminal, or run `source ~/.bashrc` / `source ~/.zshrc`
+- `config/pwnnew.sh`: open a new terminal, or source your rc file
+- `config/gdbinit`: next GDB start
+- `config/tmux.conf`: new tmux session, or `tmux source-file ~/.tmux.conf`
+- `config/templates/payload.py` and `AGENTS.md`: next `pwnnew` workspace
+
+Rerun `python3 init-config.py` after:
+
+- moving the package directory
+- editing `config/mcp/codex-ida.toml`
+
+## Commands
 
 ```bash
-python3 init-config.py paths
+python3 init-install.py              # full install, then apply config
+python3 init-install.py --menu       # interactive install
+python3 init-install.py --no-config  # install software only
+python3 init-install.py --test       # check software and config
+
+python3 init-config.py               # apply ./config
+python3 init-config.py --test        # check config and hooks
+python3 init-config.py paths         # show editable files
+python3 init-config.py clean         # remove init hooks only
 ```
 
-## Config layout
+## pwnnew
+
+After applying config:
+
+```bash
+pwnnew babyrop
+pwnnew babyrop ./chall ./libc.so.6 ./ld-linux-x86-64.so.2
+pwnnew ./challenge.zip
+pwnnew --no-extract ./challenge.zip
+```
+
+A new workspace contains:
 
 ```text
-config/
-├── shell.sh                    # PATH, zsh helper, aliases, trashy aliases
-├── pwnnew.sh                   # pwnnew workspace helper
-├── gdbinit                     # GDB defaults
-├── tmux.conf                   # tmux defaults
-├── templates/
-│   ├── solve.py                # pwnnew default pwntools template
-│   └── AGENTS.md               # AI assistant workspace notes
-└── mcp/
-    ├── codex-ida.toml          # Codex IDA MCP config block
-    └── ida-mcp-windows.md      # Windows-side IDA MCP notes
+payload.py
+AGENTS.md
 ```
 
-## Editing config
+## Notes
 
-Most edits do not require rerunning `init-config.py`:
-
-- `config/shell.sh`: reopen terminal, or run `source ~/.bashrc` / `source ~/.zshrc`.
-- `config/pwnnew.sh`: reopen terminal, or source your rc file.
-- `config/gdbinit`: next GDB start.
-- `config/tmux.conf`: new tmux session, or `tmux source-file ~/.tmux.conf`.
-- `config/templates/solve.py` / `AGENTS.md`: next `pwnnew` workspace.
-
-Rerun config after editing:
-
-- `config/mcp/codex-ida.toml`, because it is merged into `~/.codex/config.toml`.
-- after moving the whole package directory, because hooks store the package path.
-
-## Node / nvm / pnpm
-
-`config/shell.sh` does not source `nvm.sh`. nvm's official installer usually writes its own shell block, and loading it twice can duplicate PATH entries or slow shell startup.
-
-`init-install.py` still sources nvm temporarily inside install commands when installing Codex. Long-term shell config only adds common user binary paths such as `~/.local/bin`, `~/.cargo/bin`, and Go bin directories.
-
-## Hooks and cleanup
-
-`init-config.py` writes short marked blocks into:
-
-- `~/.bashrc`
-- `~/.zshrc`
-- `~/.gdbinit`
-- `~/.tmux.conf`
-- `~/.codex/config.toml`
-
-Blocks use names like:
-
-```text
-# >>> init-shell >>>
-...
-# <<< init-shell <<<
-```
-
-`clean` removes only `init-*` blocks created by this package. It does not uninstall apt/pip/gem/cargo/npm software.
+- `clean` removes only marked `init-*` hooks. It does not uninstall apt, pip, gem, cargo, npm, or cloned tools.
+- `config/shell.sh` does not load `nvm.sh`; nvm is handled by its own installer.
+- If you move the package, rerun `python3 init-config.py` once so hooks point to the new path.

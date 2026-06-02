@@ -4,19 +4,18 @@ from pathlib import Path
 import os
 import sys
 
-# Usage examples:
-#   python3 solve.py
-#   python3 solve.py GDB
-#   python3 solve.py REMOTE HOST=host PORT=31337
-#   python3 solve.py BIN=./chall LIBC=./libc.so.6 LD=./ld-linux-x86-64.so.2
-# Pwntools also accepts magic args through environment, e.g. PWNLIB_NOTERM=1.
+# Examples:
+#   python3 payload.py
+#   python3 payload.py GDB
+#   python3 payload.py REMOTE HOST=host PORT=31337
+#   python3 payload.py BIN=./chall LIBC=./libc.so.6 LD=./ld-linux-x86-64.so.2
 
 context.log_level = os.environ.get("LOG", "info")
 if os.environ.get("TMUX"):
     context.terminal = ["tmux", "splitw", "-h"]
 
 
-def kv_args():
+def parse_args():
     kv, flags = {}, set()
     for item in sys.argv[1:]:
         if "=" in item:
@@ -27,7 +26,7 @@ def kv_args():
     return kv, flags
 
 
-KV, FLAGS = kv_args()
+KV, FLAGS = parse_args()
 
 
 def arg(name, default=None):
@@ -46,9 +45,9 @@ def is_elf(path: Path) -> bool:
 
 
 def auto_elf() -> Path:
-    candidates = [p for p in Path(".").iterdir() if is_elf(p)]
-    if not candidates:
-        log.error("No ELF found. Use: python3 solve.py BIN=./chall")
+    files = [p for p in Path(".").iterdir() if is_elf(p)]
+    if not files:
+        log.error("No ELF found. Use: python3 payload.py BIN=./chall")
 
     def score(p: Path):
         name = p.name.lower()
@@ -61,7 +60,7 @@ def auto_elf() -> Path:
             s += 80
         return (s, len(name), name)
 
-    return sorted(candidates, key=score)[0]
+    return sorted(files, key=score)[0]
 
 
 def auto_file(pred):
@@ -81,7 +80,6 @@ libc = ELF(libc_path, checksec=False) if libc_path else None
 HOST = arg("host", "127.0.0.1")
 PORT = int(arg("port", 0) or 0)
 
-# Tune this per challenge. For PIE, use pwndbg's start/entry helpers or add a runtime breakpoint.
 gdbscript = arg("gdbscript") or """
 set pagination off
 set disassembly-flavor intel
@@ -106,14 +104,14 @@ def local_env():
 def start():
     if flag("remote") or flag("r"):
         if not PORT:
-            log.error("Remote mode needs: python3 solve.py REMOTE HOST=<host> PORT=<port>")
+            log.error("Remote mode needs: python3 payload.py REMOTE HOST=<host> PORT=<port>")
         return remote(HOST, PORT)
     if flag("gdb") or flag("debug") or flag("d"):
         return gdb.debug(local_argv(), gdbscript=gdbscript, env=local_env())
     return process(local_argv(), env=local_env())
 
 
-# Convenience wrappers. Use or delete as needed.
+# Short pwntools helpers.
 def sla(delim, data): return io.sendlineafter(delim, data)
 def sa(delim, data): return io.sendafter(delim, data)
 def sl(data=b""): return io.sendline(data)
@@ -129,14 +127,14 @@ def pack_addr(x):
 
 def leak_addr(data, bits=None):
     bits = bits or context.bits
-    width = 8 if bits == 64 else 4
-    return u64(data.ljust(8, b"\x00")) if width == 8 else u32(data.ljust(4, b"\x00"))
+    if bits == 64:
+        return u64(data.ljust(8, b"\x00"))
+    return u32(data.ljust(4, b"\x00"))
 
 
 io = start()
 
 # ---- exploit here ----
-# Examples:
 # rop = ROP(exe)
 # payload = flat({offset: [rop.ret.address, exe.sym.win]})
 # sl(payload)

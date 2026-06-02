@@ -1,5 +1,4 @@
-# pwnnew: create a pwn challenge workspace from templates.
-# Requires INIT_HOME from init-config.py shell hook.
+# pwnnew: create a pwn challenge workspace from init templates.
 
 pwnnew() {
   local root="${INIT_HOME:-}"
@@ -8,14 +7,20 @@ pwnnew() {
     return 2
   fi
 
+  if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    echo "usage: pwnnew NAME [FILES...]"
+    echo "       pwnnew FILE [MORE_FILES...]"
+    echo "       pwnnew --no-extract ARCHIVE"
+    return 0
+  fi
+
   local tpl_dir="$root/config/templates"
   local name=""
   local files=()
   local auto_extract=1
 
   if [ "$#" -eq 0 ]; then
-    echo "usage: pwnnew NAME [FILES...]  or  pwnnew FILE [MORE_FILES...]" >&2
-    echo "       env: PWNNEW_NO_EXTRACT=1 to copy archives without extracting" >&2
+    pwnnew --help >&2
     return 2
   fi
 
@@ -26,7 +31,7 @@ pwnnew() {
   [ -n "$PWNNEW_NO_EXTRACT" ] && auto_extract=0
 
   if [ "$#" -eq 0 ]; then
-    echo "pwnnew: missing name or files" >&2
+    echo "pwnnew: missing name or file" >&2
     return 2
   fi
 
@@ -56,10 +61,7 @@ pwnnew() {
   done
   mkdir -p "$dir" || return 1
 
-  if [ -f "$tpl_dir/solve.py" ]; then
-    cp -n "$tpl_dir/solve.py" "$dir/solve.py"
-    chmod +x "$dir/solve.py" 2>/dev/null || true
-  fi
+  [ -f "$tpl_dir/payload.py" ] && cp -n "$tpl_dir/payload.py" "$dir/payload.py" && chmod +x "$dir/payload.py" 2>/dev/null || true
   [ -f "$tpl_dir/AGENTS.md" ] && cp -n "$tpl_dir/AGENTS.md" "$dir/AGENTS.md"
 
   local f
@@ -90,6 +92,6 @@ pwnnew() {
   fi
 
   cd "$dir" || return 1
-  echo "created: $PWD"
+  echo "workspace: $PWD"
   ls -la
 }

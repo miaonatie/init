@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""One-shot WSL/Kali/Debian/Ubuntu pwn environment installer."""
+"""One-shot CTF pwn environment installer for fresh WSL/Linux systems."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-VERSION = "2026-06-02.6"
+VERSION = "v2.0.0"
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
 
@@ -631,6 +631,112 @@ Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled \"false\";
         r = self.run(["bash", "-lc", f"curl -fsSL {CC_SWITCH_INSTALL} | bash"], network=True, check=False)
         if r.returncode != 0: self.failures.append("cc-switch install failed")
 
+
+    def find_cmd(self, names: list[str]) -> Optional[str]:
+        for name in names:
+            found = shutil.which(name)
+            if found:
+                return found
+            if "/" not in name:
+                for d in [self.home / ".local" / "bin", self.home / ".cargo" / "bin", self.home / ".local" / "go" / "bin", self.home / "go" / "bin"]:
+                    candidate = d / name
+                    if candidate.exists() and os.access(candidate, os.X_OK):
+                        return str(candidate)
+        return None
+
+    def check_cmd(self, label: str, names: list[str], required: bool = True) -> bool:
+        found = self.find_cmd(names)
+        if found:
+            self.ui.ok(f"{label}: {found}")
+            return True
+        (self.ui.err if required else self.ui.warn)(f"{label}: missing")
+        return not required
+
+    def check_apt_group(self, label: str, packages: list[str], required: bool = True) -> bool:
+        missing = [pkg for pkg in packages if not self.pkg_installed(pkg)]
+        if not missing:
+            self.ui.ok(f"APT {label}: all installed ({len(packages)})")
+            return True
+        msg = f"APT {label}: missing {len(missing)}/{len(packages)}: " + ", ".join(missing[:12]) + (" ..." if len(missing) > 12 else "")
+        (self.ui.err if required else self.ui.warn)(msg)
+        return not required
+
+    def check_python_packages(self, packages: list[str]) -> bool:
+        installed = self.pip_names()
+        missing = [p for p in packages if self.norm_pkg(p) not in installed]
+        if not missing:
+            self.ui.ok(f"Python packages: all installed ({len(packages)})")
+            return True
+        self.ui.err("Python packages missing: " + ", ".join(missing))
+        return False
+
+    def check_repos(self) -> bool:
+        ok_all = True
+        for name in HELPER_REPOS:
+            path = self.tools_dir / name
+            if (path / ".git").exists():
+                self.ui.ok(f"repo {name}: {path}")
+            else:
+                self.ui.warn(f"repo {name}: missing at {path}")
+                ok_all = False
+        return ok_all
+
+    def test(self) -> int:
+        self._tmp_path_env()
+        self.ui.banner(self.distro)
+        print()
+        print(self.ui.cyan + "Software checks" + self.ui.reset)
+        ok_all = True
+
+        for label, pkgs in [
+            ("core", CORE_APT), ("i386", I386_APT), ("qemu", QEMU_APT),
+            ("ruby", RUBY_APT), ("java", DEFAULT_JRE_APT), ("modern-cli", MODERN_CLI_APT),
+        ]:
+            ok_all = self.check_apt_group(label, pkgs) and ok_all
+
+        print("\nCommands:")
+        command_checks = [
+            ("python3", ["python3"], True), ("pip3", ["pip3"], True), ("git", ["git"], True),
+            ("curl", ["curl"], True), ("gcc", ["gcc"], True), ("g++", ["g++"], True),
+            ("gdb", ["gdb"], True), ("gdb-multiarch", ["gdb-multiarch"], True),
+            ("checksec", ["checksec"], True), ("patchelf", ["patchelf"], True),
+            ("ROPgadget", ["ROPgadget", "ropgadget"], True), ("ropper", ["ropper"], True),
+            ("pwndbg", ["pwndbg", "pwndbg-gdb"], True),
+            ("one_gadget", ["one_gadget"], True), ("seccomp-tools", ["seccomp-tools"], True),
+            ("qemu", ["qemu-x86_64", "qemu-i386"], True), ("zsh", ["zsh"], True),
+            ("hyfetch", ["hyfetch"], True), ("trash", ["trash"], True),
+            ("bat", ["bat", "batcat"], True), ("eza", ["eza"], True),
+            ("fzf", ["fzf"], True), ("btop", ["btop"], True), ("duf", ["duf"], True),
+            ("rustc", ["rustc"], True), ("cargo", ["cargo"], True),
+            ("go", ["go"], True), ("java", ["java"], True),
+            ("node", ["node"], True), ("npm", ["npm"], True), ("pnpm", ["pnpm"], True),
+            ("codex", ["codex"], True), ("claude", ["claude"], True), ("cc-switch", ["cc-switch"], True),
+        ]
+        for label, names, required in command_checks:
+            ok_all = self.check_cmd(label, names, required) and ok_all
+
+        print("\nPython packages:")
+        ok_all = self.check_python_packages(PYTHON_PWN) and ok_all
+
+        print("\nHelper repositories:")
+        ok_all = self.check_repos() and ok_all
+
+        print("\nConfig checks:")
+        cfg = ROOT / "init-config.py"
+        if cfg.exists():
+            r = subprocess.run([sys.executable, str(cfg), "--test"])
+            ok_all = (r.returncode == 0) and ok_all
+        else:
+            self.ui.err("init-config.py missing")
+            ok_all = False
+
+        print()
+        if ok_all:
+            self.ui.ok("test passed")
+            return 0
+        self.ui.warn("test found missing items. Re-run installer, or inspect state/install-report.txt.")
+        return 1
+
     def install_config(self) -> None:
         if self.no_config: return
         self.ui.section("apply init config")
@@ -731,18 +837,30 @@ def help_text() -> str:
 init-install {VERSION}
 
 Usage:
-  python3 init-install.py             Default full install, then apply config
-  python3 init-install.py --menu      Interactive software selection
-  python3 init-install.py --no-config Install software only, skip config apply
-  python3 init-install.py -h          Show help
+  python3 init-install.py              Full install, then apply config
+  python3 init-install.py --menu       Choose install modules interactively
+  python3 init-install.py --no-config  Install software only
+  python3 init-install.py --test       Check software and config
+  python3 init-install.py -h           Show help
 
-Config source stays in ./config/. Use init-config.py to apply or clean hooks.
+Notes:
+  - Designed for a fresh WSL/Kali/Debian/Ubuntu pwn environment.
+  - It is safe to rerun: installed items are skipped or updated when possible.
+  - Editable config lives in ./config/.
 """.strip()
 
 
 def main(argv: list[str]) -> int:
     if "-h" in argv or "--help" in argv:
         print(help_text()); return 0
+    if "--version" in argv:
+        print(VERSION); return 0
+    if "--test" in argv:
+        extra = [a for a in argv if a != "--test"]
+        if extra:
+            print("--test cannot be combined with other options", file=sys.stderr)
+            print(help_text()); return 2
+        return Installer(Choices(), no_config=True).test()
     allowed = {"--menu", "--no-config"}
     unknown = [a for a in argv if a not in allowed]
     if unknown:

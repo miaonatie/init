@@ -1,8 +1,6 @@
-# init shell configuration
-# Sourced by ~/.bashrc and ~/.zshrc through init-config.py.
-# Edit this file directly; reopen your terminal or run: source ~/.bashrc / source ~/.zshrc
+# Loaded by ~/.bashrc and ~/.zshrc after running init-config.py.
+# Edit this file for PATH, zsh, and alias preferences.
 
-# PATH helper. Adds a directory once, at the front, when it exists or may be created later.
 path_prepend() {
   [ -n "$1" ] || return 0
   case ":$PATH:" in
@@ -11,15 +9,13 @@ path_prepend() {
   esac
 }
 
-# User-level tools installed by pip --user, cargo, Go, pnpm, Claude/Codex wrappers, etc.
-# nvm itself is loaded by nvm's installer-generated shell block, not here, to avoid double loading.
 path_prepend "$HOME/.local/bin"
 path_prepend "$HOME/.cargo/bin"
 path_prepend "$HOME/.local/go/bin"
 path_prepend "$HOME/go/bin"
 export PATH
 
-# zsh + oh-my-zsh. Skip if oh-my-zsh is already loaded by the user's .zshrc.
+# zsh helpers
 if [ -n "$ZSH_VERSION" ] && [ -d "$HOME/.oh-my-zsh" ] && ! type omz >/dev/null 2>&1; then
   export ZSH="${ZSH:-$HOME/.oh-my-zsh}"
   ZSH_THEME="${ZSH_THEME:-cradle}"
@@ -27,7 +23,7 @@ if [ -n "$ZSH_VERSION" ] && [ -d "$HOME/.oh-my-zsh" ] && ! type omz >/dev/null 2
   [ -s "$ZSH/oh-my-zsh.sh" ] && source "$ZSH/oh-my-zsh.sh"
 fi
 
-# Modern ls shortcuts with graceful fallback.
+# ls shortcuts
 if command -v eza >/dev/null 2>&1; then
   alias ll='eza -alh --group-directories-first --git'
   alias la='eza -a --group-directories-first'
@@ -56,7 +52,7 @@ alias free='free -h'
 alias ports='ss -tulpen'
 alias path='printf "%s\n" ${PATH//:/ }'
 
-# trashy: crate is trashy, executable is trash.
+# trashy: crate name is trashy; command name is trash.
 if command -v trash >/dev/null 2>&1; then
   alias tp='trash put'
   alias tl='trash list'

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Apply portable init config from ./config into shell/GDB/tmux/Codex."""
+"""Apply the portable init config from ./config."""
 
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
 
-VERSION = "2026-06-02.6"
+VERSION = "v2.0.0"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
 HOME = Path.home()
 
-# This package is for fresh systems. Only init-* blocks are managed.
 BLOCK_RE = re.compile(
     r"(?ms)^# >>> init-[A-Za-z0-9_-]+ >>>\n"
     r".*?"
@@ -72,17 +72,21 @@ def upsert_block(path: Path, name: str, content: str) -> None:
     write_text(path, (old + "\n\n" + block if old else block))
 
 
-def require_config() -> None:
-    required = [
+def required_files() -> list[Path]:
+    return [
         CONFIG / "shell.sh",
         CONFIG / "pwnnew.sh",
         CONFIG / "gdbinit",
         CONFIG / "tmux.conf",
-        CONFIG / "templates" / "solve.py",
+        CONFIG / "templates" / "payload.py",
         CONFIG / "templates" / "AGENTS.md",
         CONFIG / "mcp" / "codex-ida.toml",
+        CONFIG / "mcp" / "ida-mcp-windows.md",
     ]
-    missing = [p for p in required if not p.exists()]
+
+
+def require_config() -> None:
+    missing = [p for p in required_files() if not p.exists()]
     if missing:
         raise SystemExit("missing config files:\n" + "\n".join(f"  - {p}" for p in missing))
 
@@ -135,8 +139,8 @@ def apply_codex() -> None:
     clean_codex(dst)
     current = read_text(dst)
     if IDA_SECTION_RE.search(current):
-        warn("Codex already has an unmarked [mcp_servers.ida]; leaving it unchanged to avoid duplicate TOML sections.")
-        warn("Edit ~/.codex/config.toml manually, or remove that section before rerunning config.")
+        warn("Codex already has an unmarked [mcp_servers.ida]; leaving it unchanged.")
+        warn("Remove or edit that section manually before rerunning config.")
         return
 
     old = current.rstrip()
@@ -166,7 +170,7 @@ def apply() -> None:
     }
     write_text(STATE / "config-state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     print()
-    ok("done. Open a new terminal, or run: source ~/.bashrc / source ~/.zshrc")
+    ok("ready. Open a new terminal, or run: source ~/.bashrc / source ~/.zshrc")
 
 
 def clean() -> None:
@@ -190,7 +194,7 @@ def paths() -> None:
         ("config/pwnnew.sh", "pwnnew workspace helper"),
         ("config/gdbinit", "GDB defaults"),
         ("config/tmux.conf", "tmux defaults"),
-        ("config/templates/solve.py", "default exploit template"),
+        ("config/templates/payload.py", "default payload template"),
         ("config/templates/AGENTS.md", "AI assistant workspace notes"),
         ("config/mcp/codex-ida.toml", "Codex IDA MCP block; rerun config after edits"),
         ("config/mcp/ida-mcp-windows.md", "Windows-side IDA MCP notes"),
@@ -207,21 +211,94 @@ def paths() -> None:
     print("  INIT_HOME points to the package root after applying config.")
 
 
+def _has(path: Path, *needles: str) -> bool:
+    text = read_text(path)
+    return bool(text) and all(n in text for n in needles)
+
+
+def _run_quiet(cmd: list[str], cwd: Path | None = None) -> bool:
+    try:
+        return subprocess.run(cmd, cwd=str(cwd) if cwd else None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        return False
+
+
+def test_config() -> int:
+    print(color("36", f"init-config {VERSION} test"))
+    print(f"package: {ROOT}")
+    print(f"config : {CONFIG}\n")
+    ok_all = True
+
+    print("Config source files:")
+    for p in required_files():
+        if p.exists():
+            ok(str(p.relative_to(ROOT)))
+        else:
+            err(f"missing: {p.relative_to(ROOT)}")
+            ok_all = False
+
+    print("\nSyntax checks:")
+    if _run_quiet([sys.executable, "-m", "py_compile", str(CONFIG / "templates" / "payload.py")]):
+        ok("payload.py compiles")
+    else:
+        err("payload.py compile failed")
+        ok_all = False
+    for rel in ["shell.sh", "pwnnew.sh"]:
+        p = CONFIG / rel
+        if _run_quiet(["bash", "-n", str(p)]):
+            ok(f"{rel} syntax")
+        else:
+            err(f"{rel} syntax failed")
+            ok_all = False
+
+    print("\nApplied hooks:")
+    for rc in [HOME / ".bashrc", HOME / ".zshrc"]:
+        if _has(rc, "init-shell", "INIT_HOME", str(ROOT)):
+            ok(f"shell hook: {rc}")
+        else:
+            warn(f"shell hook missing or points elsewhere: {rc}")
+            ok_all = False
+    if _has(HOME / ".gdbinit", "init-gdb", str(CONFIG / "gdbinit")):
+        ok("gdb hook: ~/.gdbinit")
+    else:
+        warn("gdb hook missing or points elsewhere: ~/.gdbinit")
+        ok_all = False
+    if _has(HOME / ".tmux.conf", "init-tmux", str(CONFIG / "tmux.conf")):
+        ok("tmux hook: ~/.tmux.conf")
+    else:
+        warn("tmux hook missing or points elsewhere: ~/.tmux.conf")
+        ok_all = False
+    codex = HOME / ".codex" / "config.toml"
+    if _has(codex, "init-codex-ida", "[mcp_servers.ida]"):
+        ok("codex MCP block: ~/.codex/config.toml")
+    elif IDA_SECTION_RE.search(read_text(codex)):
+        warn("codex has unmarked [mcp_servers.ida]; managed block not applied")
+    else:
+        warn("codex MCP block missing")
+        ok_all = False
+
+    print()
+    if ok_all:
+        ok("config test passed")
+        return 0
+    warn("config test found missing or stale items. Run: python3 init-config.py")
+    return 1
+
+
 def help_text() -> str:
     return f"""
 init-config {VERSION}
 
 Usage:
-  python3 init-config.py          Apply ./config to shell/GDB/tmux/Codex
-  python3 init-config.py clean    Remove init hooks only; does not uninstall software
-  python3 init-config.py paths    Show editable config paths
-  python3 init-config.py -h       Show this help
+  python3 init-config.py           Apply ./config to shell, GDB, tmux, and Codex
+  python3 init-config.py --test    Check config files and applied hooks
+  python3 init-config.py clean     Remove init hooks; keep files and software
+  python3 init-config.py paths     Show editable config files
+  python3 init-config.py -h        Show help
 
-Notes:
-  - Config source stays inside this package: ./config/
-  - nvm is left to its official installer; shell.sh only adds common user paths and aliases.
-  - Most edits do not need rerunning this script; open a new shell/program.
-  - After moving the package directory, rerun this script once to refresh paths.
+Common flow:
+  1. Edit files under ./config/
+  2. Rerun this script only after moving the package or editing config/mcp/codex-ida.toml
 """.strip()
 
 
@@ -233,10 +310,15 @@ def main(argv: list[str]) -> int:
     if cmd in {"-h", "--help", "help"}:
         print(help_text())
         return 0
-    if cmd == "clean":
+    if cmd in {"--version", "version"}:
+        print(VERSION)
+        return 0
+    if cmd in {"--test", "test"}:
+        return test_config()
+    if cmd in {"clean", "--clean"}:
         clean()
         return 0
-    if cmd == "paths":
+    if cmd in {"paths", "--paths"}:
         paths()
         return 0
     err(f"unknown command: {cmd}")
