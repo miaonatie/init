@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "v2.0.0"
+VERSION = "v1.0.1"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
