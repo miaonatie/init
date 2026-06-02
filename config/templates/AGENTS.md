@@ -15,13 +15,5 @@ This workspace was created by `pwnnew`.
 - Keep original challenge files unchanged.
 - Prefer pwntools for scripting and pwndbg for debugging.
 - Use `checksec`, `file`, `ldd`, `patchelf`, `ROPgadget`, `ropper`, `one_gadget`, `seccomp-tools`, `libc-database`, and `glibc-all-in-one` when useful.
-- Record leaks, offsets, libc version, and important assumptions in the workspace.
-- Keep the final exploit readable and reproducible.
-
-## MCP
-
-Default Codex IDA MCP endpoint:
-
-```text
-http://127.0.0.1:13337/mcp
-```
+- Record leaks, offsets, libc version, and important assumptions.
+- Keep the final payload readable and reproducible.

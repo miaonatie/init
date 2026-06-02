@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-VERSION = "v1.0.1"
+VERSION = "v1.0.2"
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
 

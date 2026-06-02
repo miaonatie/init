@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "v1.0.1"
+VERSION = "v1.0.2"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
@@ -24,7 +24,6 @@ BLOCK_RE = re.compile(
     r".*?"
     r"^# <<< init-[A-Za-z0-9_-]+ <<<\n?"
 )
-IDA_SECTION_RE = re.compile(r"(?ms)^\[mcp_servers\.ida\]\s*\n.*?(?=^\[|\Z)")
 
 
 def color(code: str, text: str) -> str:
@@ -80,8 +79,6 @@ def required_files() -> list[Path]:
         CONFIG / "tmux.conf",
         CONFIG / "templates" / "payload.py",
         CONFIG / "templates" / "AGENTS.md",
-        CONFIG / "mcp" / "codex-ida.toml",
-        CONFIG / "mcp" / "ida-mcp-windows.md",
     ]
 
 
@@ -115,40 +112,6 @@ def apply_tmux() -> None:
     ok("tmux hook -> ~/.tmux.conf")
 
 
-def clean_codex(path: Path) -> bool:
-    if not path.exists():
-        return False
-    old = read_text(path)
-    new = BLOCK_RE.sub("", old).strip()
-    if new:
-        new += "\n"
-    if new != old:
-        write_text(path, new)
-        return True
-    return False
-
-
-def apply_codex() -> None:
-    src = CONFIG / "mcp" / "codex-ida.toml"
-    dst = HOME / ".codex" / "config.toml"
-    content = read_text(src).strip()
-    if not content:
-        warn(f"empty MCP config: {src}")
-        return
-
-    clean_codex(dst)
-    current = read_text(dst)
-    if IDA_SECTION_RE.search(current):
-        warn("Codex already has an unmarked [mcp_servers.ida]; leaving it unchanged.")
-        warn("Remove or edit that section manually before rerunning config.")
-        return
-
-    old = current.rstrip()
-    block = f"# >>> init-codex-ida >>>\n{content}\n# <<< init-codex-ida <<<\n"
-    write_text(dst, (old + "\n\n" + block if old else block))
-    ok("codex MCP -> ~/.codex/config.toml")
-
-
 def apply() -> None:
     require_config()
     print(color("36", f"init-config {VERSION}"))
@@ -158,7 +121,6 @@ def apply() -> None:
     apply_shell()
     apply_gdb()
     apply_tmux()
-    apply_codex()
     STATE.mkdir(exist_ok=True)
     state = {
         "version": VERSION,
@@ -166,7 +128,7 @@ def apply() -> None:
         "root": str(ROOT),
         "config": str(CONFIG),
         "env": "INIT_HOME",
-        "targets": ["~/.bashrc", "~/.zshrc", "~/.gdbinit", "~/.tmux.conf", "~/.codex/config.toml"],
+        "targets": ["~/.bashrc", "~/.zshrc", "~/.gdbinit", "~/.tmux.conf"],
     }
     write_text(STATE / "config-state.json", json.dumps(state, indent=2, ensure_ascii=False) + "\n")
     print()
@@ -178,9 +140,6 @@ def clean() -> None:
     for path in (HOME / ".bashrc", HOME / ".zshrc", HOME / ".gdbinit", HOME / ".tmux.conf"):
         if remove_blocks(path):
             changed.append(str(path))
-    codex = HOME / ".codex" / "config.toml"
-    if clean_codex(codex):
-        changed.append(str(codex))
     if changed:
         for p in changed:
             ok(f"cleaned: {p}")
@@ -190,14 +149,12 @@ def clean() -> None:
 
 def paths() -> None:
     rows = [
-        ("config/shell.sh", "PATH, zsh, aliases, trashy aliases"),
+        ("config/shell.sh", "PATH, zsh helper, aliases"),
         ("config/pwnnew.sh", "pwnnew workspace helper"),
         ("config/gdbinit", "GDB defaults"),
         ("config/tmux.conf", "tmux defaults"),
-        ("config/templates/payload.py", "default payload template"),
-        ("config/templates/AGENTS.md", "AI assistant workspace notes"),
-        ("config/mcp/codex-ida.toml", "Codex IDA MCP block; rerun config after edits"),
-        ("config/mcp/ida-mcp-windows.md", "Windows-side IDA MCP notes"),
+        ("config/templates/payload.py", "default pwntools payload"),
+        ("config/templates/AGENTS.md", "workspace notes for AI assistants"),
     ]
     print("package root:")
     print(f"  {ROOT}")
@@ -205,18 +162,18 @@ def paths() -> None:
     for rel, note in rows:
         print(f"  {ROOT / rel}\n    {note}")
     print("\napplied targets:")
-    for p in ["~/.bashrc", "~/.zshrc", "~/.gdbinit", "~/.tmux.conf", "~/.codex/config.toml"]:
+    for p in ["~/.bashrc", "~/.zshrc", "~/.gdbinit", "~/.tmux.conf"]:
         print(f"  {p}")
     print("\nshell variable:")
     print("  INIT_HOME points to the package root after applying config.")
 
 
-def _has(path: Path, *needles: str) -> bool:
+def has_text(path: Path, *needles: str) -> bool:
     text = read_text(path)
     return bool(text) and all(n in text for n in needles)
 
 
-def _run_quiet(cmd: list[str], cwd: Path | None = None) -> bool:
+def run_quiet(cmd: list[str], cwd: Path | None = None) -> bool:
     try:
         return subprocess.run(cmd, cwd=str(cwd) if cwd else None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
     except Exception:
@@ -238,14 +195,14 @@ def test_config() -> int:
             ok_all = False
 
     print("\nSyntax checks:")
-    if _run_quiet([sys.executable, "-m", "py_compile", str(CONFIG / "templates" / "payload.py")]):
+    if run_quiet([sys.executable, "-m", "py_compile", str(CONFIG / "templates" / "payload.py")]):
         ok("payload.py compiles")
     else:
         err("payload.py compile failed")
         ok_all = False
     for rel in ["shell.sh", "pwnnew.sh"]:
         p = CONFIG / rel
-        if _run_quiet(["bash", "-n", str(p)]):
+        if run_quiet(["bash", "-n", str(p)]):
             ok(f"{rel} syntax")
         else:
             err(f"{rel} syntax failed")
@@ -253,28 +210,20 @@ def test_config() -> int:
 
     print("\nApplied hooks:")
     for rc in [HOME / ".bashrc", HOME / ".zshrc"]:
-        if _has(rc, "init-shell", "INIT_HOME", str(ROOT)):
+        if has_text(rc, "init-shell", "INIT_HOME", str(ROOT)):
             ok(f"shell hook: {rc}")
         else:
             warn(f"shell hook missing or points elsewhere: {rc}")
             ok_all = False
-    if _has(HOME / ".gdbinit", "init-gdb", str(CONFIG / "gdbinit")):
+    if has_text(HOME / ".gdbinit", "init-gdb", str(CONFIG / "gdbinit")):
         ok("gdb hook: ~/.gdbinit")
     else:
         warn("gdb hook missing or points elsewhere: ~/.gdbinit")
         ok_all = False
-    if _has(HOME / ".tmux.conf", "init-tmux", str(CONFIG / "tmux.conf")):
+    if has_text(HOME / ".tmux.conf", "init-tmux", str(CONFIG / "tmux.conf")):
         ok("tmux hook: ~/.tmux.conf")
     else:
         warn("tmux hook missing or points elsewhere: ~/.tmux.conf")
-        ok_all = False
-    codex = HOME / ".codex" / "config.toml"
-    if _has(codex, "init-codex-ida", "[mcp_servers.ida]"):
-        ok("codex MCP block: ~/.codex/config.toml")
-    elif IDA_SECTION_RE.search(read_text(codex)):
-        warn("codex has unmarked [mcp_servers.ida]; managed block not applied")
-    else:
-        warn("codex MCP block missing")
         ok_all = False
 
     print()
@@ -290,15 +239,15 @@ def help_text() -> str:
 init-config {VERSION}
 
 Usage:
-  python3 init-config.py           Apply ./config to shell, GDB, tmux, and Codex
+  python3 init-config.py           Apply ./config to shell, GDB, and tmux
   python3 init-config.py --test    Check config files and applied hooks
   python3 init-config.py clean     Remove init hooks; keep files and software
   python3 init-config.py paths     Show editable config files
   python3 init-config.py -h        Show help
 
-Common flow:
-  1. Edit files under ./config/
-  2. Rerun this script only after moving the package or editing config/mcp/codex-ida.toml
+Notes:
+  - Edit files under ./config/ directly.
+  - Rerun this script after moving the package directory.
 """.strip()
 
 

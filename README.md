@@ -1,13 +1,41 @@
-# init v2
+# init v1.0.2
 
 Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
 
-Unpack the package, optionally edit `config/`, then run the installer. The configuration source stays inside this directory; short hooks load it from your shell, GDB, tmux, and Codex config.
+Unpack the package, optionally edit `config/`, then run the installer. Release archives extract into an `init/` directory. The package directory is the config source. Short hooks load it from your shell, GDB, and tmux config.
+
+## WSL basics
+
+List Linux distributions available online:
+
+```powershell
+wsl --list --online
+```
+
+Install one distribution, for example Kali Linux:
+
+```powershell
+wsl --install -d kali-linux
+```
+
+Docker Desktop can install and manage its own Docker WSL distributions automatically. After installing Docker Desktop, you may see Docker entries in the WSL list.
+
+Show installed WSL distributions and their versions/status:
+
+```powershell
+wsl -l -v
+```
+
+Set the default WSL distribution:
+
+```powershell
+wsl --set-default kali-linux
+```
 
 ## Quick start
 
 ```bash
-cd init-v2
+cd init
 python3 init-install.py
 ```
 
@@ -27,7 +55,6 @@ Check status:
 
 ```bash
 python3 init-install.py --test
-# or config only
 python3 init-config.py --test
 ```
 
@@ -40,7 +67,10 @@ python3 init-config.py clean
 ## Files
 
 ```text
-init-v2/
+init/
+├── VERSION
+├── README.md
+├── .gitignore
 ├── init-install.py      # software installer
 ├── init-config.py       # config applier / cleaner
 ├── config/              # editable source config
@@ -56,8 +86,6 @@ gdbinit                  # GDB defaults
 tmux.conf                # tmux defaults
 templates/payload.py     # default pwntools payload
 templates/AGENTS.md      # workspace notes for AI assistants
-mcp/codex-ida.toml       # Codex IDA MCP block
-mcp/ida-mcp-windows.md   # Windows-side IDA MCP notes
 ```
 
 ## Editing
@@ -70,10 +98,7 @@ Most edits take effect without rerunning `init-config.py`:
 - `config/tmux.conf`: new tmux session, or `tmux source-file ~/.tmux.conf`
 - `config/templates/payload.py` and `AGENTS.md`: next `pwnnew` workspace
 
-Rerun `python3 init-config.py` after:
-
-- moving the package directory
-- editing `config/mcp/codex-ida.toml`
+Rerun `python3 init-config.py` after moving the package directory.
 
 ## Commands
 
@@ -107,8 +132,41 @@ payload.py
 AGENTS.md
 ```
 
+## Optional: Windows IDA MCP notes
+
+This package no longer writes Codex MCP config automatically. If you want IDA MCP, configure your assistant manually and run the MCP server on Windows.
+
+WSL/Codex endpoint example:
+
+```toml
+[mcp_servers.ida]
+url = "http://127.0.0.1:13337/mcp"
+enabled = true
+startup_timeout_sec = 30
+tool_timeout_sec = 180
+default_tools_approval_mode = "prompt"
+```
+
+Windows PowerShell example:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+mkdir C:\tools
+cd C:\tools
+git clone https://github.com/mrexodia/ida-pro-mcp
+cd C:\tools\ida-pro-mcp
+uv run idalib-mcp --host 127.0.0.1 --port 13337 C:\ctf\babyrop\chall
+```
+
+Then in WSL:
+
+```bash
+cd /mnt/c/ctf/babyrop
+codex
+```
+
 ## Notes
 
 - `clean` removes only marked `init-*` hooks. It does not uninstall apt, pip, gem, cargo, npm, or cloned tools.
 - `config/shell.sh` does not load `nvm.sh`; nvm is handled by its own installer.
-- If you move the package, rerun `python3 init-config.py` once so hooks point to the new path.
+- `.gitignore` is for maintaining this package as a Git repository. It is not copied into challenge workspaces.

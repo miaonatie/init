@@ -1,7 +1,21 @@
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+.venv/
+venv/
 
+# Runtime reports
 state/
 
+# Local archives / release assets
 init-v*.zip
 init-v*.tar.gz
+init-v*.tgz
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.bak
