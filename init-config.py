@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "v1.0.2"
+VERSION = "v1.0.3"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
@@ -241,8 +241,8 @@ init-config {VERSION}
 Usage:
   python3 init-config.py           Apply ./config to shell, GDB, and tmux
   python3 init-config.py --test    Check config files and applied hooks
-  python3 init-config.py clean     Remove init hooks; keep files and software
-  python3 init-config.py paths     Show editable config files
+  python3 init-config.py --clean   Remove init hooks; keep files and software
+  python3 init-config.py --paths   Show editable config files
   python3 init-config.py -h        Show help
 
 Notes:
@@ -256,18 +256,18 @@ def main(argv: list[str]) -> int:
         apply()
         return 0
     cmd = argv[0]
-    if cmd in {"-h", "--help", "help"}:
+    if cmd in {"-h", "--help"}:
         print(help_text())
         return 0
-    if cmd in {"--version", "version"}:
+    if cmd == "--version":
         print(VERSION)
         return 0
-    if cmd in {"--test", "test"}:
+    if cmd == "--test":
         return test_config()
-    if cmd in {"clean", "--clean"}:
+    if cmd == "--clean":
         clean()
         return 0
-    if cmd in {"paths", "--paths"}:
+    if cmd == "--paths":
         paths()
         return 0
     err(f"unknown command: {cmd}")

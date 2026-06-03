@@ -1,48 +1,37 @@
-# init v1.0.2
+# init v1.0.3
 
 Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
 
-Unpack the package, optionally edit `config/`, then run the installer. Release archives extract into an `init/` directory. The package directory is the config source. Short hooks load it from your shell, GDB, and tmux config.
+`init` has two small scripts:
 
-## WSL basics
-
-List Linux distributions available online:
-
-```powershell
-wsl --list --online
+```text
+init-install.py   install pwn tools and packages
+init-config.py    apply shell, GDB, and tmux config from ./config
 ```
 
-Install one distribution, for example Kali Linux:
+The package directory is the config source. Edit files under `config/` directly.
 
-```powershell
-wsl --install -d kali-linux
-```
-
-Docker Desktop can install and manage its own Docker WSL distributions automatically. After installing Docker Desktop, you may see Docker entries in the WSL list.
-
-Show installed WSL distributions and their versions/status:
-
-```powershell
-wsl -l -v
-```
-
-Set the default WSL distribution:
-
-```powershell
-wsl --set-default kali-linux
-```
+---
 
 ## Quick start
 
 ```bash
-cd init
+cd init-v1.0.3
 python3 init-install.py
 ```
+
+This installs the default environment and then applies config automatically.
 
 Interactive install:
 
 ```bash
 python3 init-install.py --menu
+```
+
+Install software only:
+
+```bash
+python3 init-install.py --no-config
 ```
 
 Apply config only:
@@ -58,71 +47,120 @@ python3 init-install.py --test
 python3 init-config.py --test
 ```
 
-Clean hooks without uninstalling software:
+Clean config hooks:
 
 ```bash
-python3 init-config.py clean
+python3 init-config.py --clean
 ```
+
+Show editable files:
+
+```bash
+python3 init-config.py --paths
+```
+
+Help:
+
+```bash
+python3 init-install.py -h
+python3 init-config.py -h
+```
+
+---
 
 ## Files
 
 ```text
-init/
+init-v1.0.3/
 ├── VERSION
 ├── README.md
 ├── .gitignore
-├── init-install.py      # software installer
-├── init-config.py       # config applier / cleaner
-├── config/              # editable source config
-└── state/               # reports generated after running
+├── init-install.py
+├── init-config.py
+└── config/
+    ├── shell.sh
+    ├── pwnnew.sh
+    ├── gdbinit
+    ├── tmux.conf
+    └── templates/
+        ├── payload.py
+        └── AGENTS.md
 ```
 
-`config/` contains:
+---
+
+## What gets installed
+
+Default install includes common pwn tooling:
 
 ```text
-shell.sh                 # PATH, zsh helper, aliases
-pwnnew.sh                # create pwn workspaces
-gdbinit                  # GDB defaults
-tmux.conf                # tmux defaults
-templates/payload.py     # default pwntools payload
-templates/AGENTS.md      # workspace notes for AI assistants
+System:
+  build-essential, gcc/g++, gdb, gdbserver, gdb-multiarch,
+  checksec, patchelf, binutils, ltrace, strace, seccomp,
+  qemu-user, i386/multilib support
+
+Python:
+  pwntools, ROPgadget, ropper, capstone, unicorn,
+  keystone-engine, z3-solver, pyelftools, lief, ipython
+
+Ruby:
+  one_gadget, seccomp-tools
+
+CLI:
+  zsh, oh-my-zsh, fzf, bat, eza, btop, duf, trashy
+
+Repos:
+  pwndbg, glibc-all-in-one, libc-database
+
+AI CLI:
+  Codex CLI, Claude Code, cc-switch
 ```
 
-## Editing
+The installer is safe to rerun. It skips installed tools when possible and records skipped/failed items under `state/`.
 
-Most edits take effect without rerunning `init-config.py`:
+---
 
-- `config/shell.sh`: open a new terminal, or run `source ~/.bashrc` / `source ~/.zshrc`
-- `config/pwnnew.sh`: open a new terminal, or source your rc file
-- `config/gdbinit`: next GDB start
-- `config/tmux.conf`: new tmux session, or `tmux source-file ~/.tmux.conf`
-- `config/templates/payload.py` and `AGENTS.md`: next `pwnnew` workspace
+## Config source
 
-Rerun `python3 init-config.py` after moving the package directory.
+All long-term editable config lives in `config/`.
 
-## Commands
+### `config/shell.sh`
+
+Loaded by bash/zsh after running `init-config.py`.
+
+Use it for:
+
+```text
+PATH
+zsh / oh-my-zsh helper
+aliases
+trashy aliases
+```
+
+After editing:
 
 ```bash
-python3 init-install.py              # full install, then apply config
-python3 init-install.py --menu       # interactive install
-python3 init-install.py --no-config  # install software only
-python3 init-install.py --test       # check software and config
-
-python3 init-config.py               # apply ./config
-python3 init-config.py --test        # check config and hooks
-python3 init-config.py paths         # show editable files
-python3 init-config.py clean         # remove init hooks only
+source ~/.bashrc
+# or
+source ~/.zshrc
 ```
 
-## pwnnew
+No need to rerun `init-config.py`.
 
-After applying config:
+---
+
+### `config/pwnnew.sh`
+
+Defines the `pwnnew` command.
+
+Examples:
 
 ```bash
 pwnnew babyrop
 pwnnew babyrop ./chall ./libc.so.6 ./ld-linux-x86-64.so.2
 pwnnew ./challenge.zip
 pwnnew --no-extract ./challenge.zip
+pwnnew --help
 ```
 
 A new workspace contains:
@@ -132,41 +170,230 @@ payload.py
 AGENTS.md
 ```
 
-## Optional: Windows IDA MCP notes
+After editing `pwnnew.sh`, open a new terminal or source your shell rc file.
 
-This package no longer writes Codex MCP config automatically. If you want IDA MCP, configure your assistant manually and run the MCP server on Windows.
+---
 
-WSL/Codex endpoint example:
+### `config/templates/payload.py`
 
-```toml
-[mcp_servers.ida]
-url = "http://127.0.0.1:13337/mcp"
-enabled = true
-startup_timeout_sec = 30
-tool_timeout_sec = 180
-default_tools_approval_mode = "prompt"
+Default pwntools payload template copied by `pwnnew`.
+
+Examples:
+
+```bash
+python3 payload.py
+python3 payload.py GDB
+python3 payload.py REMOTE HOST=example.com PORT=31337
+python3 payload.py BIN=./chall LIBC=./libc.so.6 LD=./ld-linux-x86-64.so.2
 ```
 
-Windows PowerShell example:
+Edit this file to change the default template for future challenges.
+
+Existing challenge directories are not modified.
+
+---
+
+### `config/templates/AGENTS.md`
+
+Default workspace note for Codex / Claude Code.
+
+Edit it to match your own workflow.
+
+---
+
+### `config/gdbinit`
+
+Loaded by `~/.gdbinit`.
+
+Default settings:
+
+```text
+Intel disassembly
+no pagination
+no confirm prompts
+pretty printing
+fork-following defaults
+```
+
+After editing, restart GDB.
+
+---
+
+### `config/tmux.conf`
+
+Loaded by `~/.tmux.conf`.
+
+Default settings:
+
+```text
+mouse on
+larger history limit
+```
+
+Reload manually if needed:
+
+```bash
+tmux source-file ~/.tmux.conf
+```
+
+---
+
+## Moving the package
+
+`init-config.py` writes the package path into shell, GDB, and tmux hooks.
+
+After moving the whole directory, run:
+
+```bash
+python3 init-config.py
+```
+
+from the new location.
+
+---
+
+## Clean
+
+Remove hooks written by this package:
+
+```bash
+python3 init-config.py --clean
+```
+
+This removes only marked `init-*` blocks from:
+
+```text
+~/.bashrc
+~/.zshrc
+~/.gdbinit
+~/.tmux.conf
+```
+
+It does not uninstall software.
+
+---
+
+## Optional: IDA MCP with uv tool
+
+This is a minimal Windows-side setup for `idalib-mcp`.
+
+Goal:
+
+```text
+Install idalib-mcp with uv tool.
+Activate your local IDA path.
+Use idalib-mcp.exe in cc-switch / Codex / Claude Code as stdio MCP.
+```
+
+### 1. Install uv
+
+PowerShell:
 
 ```powershell
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-mkdir C:\tools
-cd C:\tools
-git clone https://github.com/mrexodia/ida-pro-mcp
-cd C:\tools\ida-pro-mcp
-uv run idalib-mcp --host 127.0.0.1 --port 13337 C:\ctf\babyrop\chall
 ```
 
-Then in WSL:
+Reopen PowerShell:
 
-```bash
-cd /mnt/c/ctf/babyrop
-codex
+```powershell
+uv --version
 ```
+
+### 2. Install ida-pro-mcp
+
+```powershell
+uv tool install "ida-pro-mcp @ https://github.com/mrexodia/ida-pro-mcp/archive/refs/heads/main.zip"
+```
+
+Optional check:
+
+```powershell
+uv tool list
+```
+
+Expected entry:
+
+```text
+ida-pro-mcp
+- idalib-mcp
+```
+
+### 3. Activate IDA path
+
+Set your IDA directory:
+
+```powershell
+$IdaDir = "E:\ida"
+```
+
+Change `E:\ida` to your real IDA install path.
+
+Run:
+
+```powershell
+$ToolPy = "$(uv tool dir)\ida-pro-mcp\Scripts\python.exe"
+& $ToolPy "$IdaDir\idalib\python\py-activate-idalib.py" -d "$IdaDir"
+```
+
+### 4. Get idalib-mcp path
+
+```powershell
+$IdalibMcp = "$(uv tool dir)\ida-pro-mcp\Scripts\idalib-mcp.exe"
+Write-Host $IdalibMcp
+```
+
+Copy the printed path.
+
+Example:
+
+```text
+C:\Users\<USER>\AppData\Roaming\uv\tools\ida-pro-mcp\Scripts\idalib-mcp.exe
+```
+
+### 5. cc-switch config
+
+Type:
+
+```text
+Custom / stdio
+```
+
+Command:
+
+```text
+<the idalib-mcp.exe path from step 4>
+```
+
+Arguments:
+
+```text
+--stdio-shared
+```
+
+Equivalent JSON:
+
+```json
+{
+  "type": "stdio",
+  "command": "C:\\Users\\<USER>\\AppData\\Roaming\\uv\\tools\\ida-pro-mcp\\Scripts\\idalib-mcp.exe",
+  "args": ["--stdio-shared"]
+}
+```
+
+### 6. Test
+
+In Codex / Claude Code:
+
+```text
+/mcp
+```
+
+If `idalib-mcp` appears, it is ready.
+
+---
 
 ## Notes
 
-- `clean` removes only marked `init-*` hooks. It does not uninstall apt, pip, gem, cargo, npm, or cloned tools.
+- `init` does not write Codex MCP config automatically.
 - `config/shell.sh` does not load `nvm.sh`; nvm is handled by its own installer.
 - `.gitignore` is for maintaining this package as a Git repository. It is not copied into challenge workspaces.
