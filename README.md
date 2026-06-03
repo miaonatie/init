@@ -2,6 +2,16 @@
 
 Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
 
+Recommended install method:
+
+```bash
+git clone https://github.com/miaonatie/init.git
+cd init
+python3 init-install.py
+```
+
+`init` has two scripts:
+
 ```text
 init-install.py   install tools
 init-config.py    apply config from ./config
@@ -9,14 +19,13 @@ init-config.py    apply config from ./config
 
 Edit files under `config/` directly. The package directory is the config source.
 
-Linux shell files are kept as LF. If Windows editing adds CRLF, run `python3 init-config.py` once to normalize them.
-
 ---
 
 ## Quick start
 
+Install the default environment:
+
 ```bash
-cd init-v1.0.5
 python3 init-install.py
 ```
 
@@ -59,10 +68,10 @@ python3 init-config.py --paths
 
 ---
 
-## Files
+## Layout
 
 ```text
-init-v1.0.5/
+init/
 ├── VERSION
 ├── README.md
 ├── .gitignore
@@ -92,17 +101,26 @@ Repos:   pwndbg, glibc-all-in-one, libc-database
 AI:      Codex CLI, Claude Code, cc-switch
 ```
 
-The installer skips installed tools when possible. It is safe to rerun.
+Installed tools are skipped when possible. The installer is safe to rerun.
 
 ---
 
-## Config
+## Config files
 
 ### `config/shell.sh`
 
-Loaded by bash/zsh. Use it for PATH, zsh settings, aliases, and trashy aliases.
+Loaded by bash/zsh.
 
-After editing:
+Use it for:
+
+```text
+PATH
+zsh / oh-my-zsh settings
+aliases
+trashy aliases
+```
+
+Reload after editing:
 
 ```bash
 source ~/.bashrc
@@ -186,6 +204,24 @@ Removes marked `init-*` blocks from:
 ```
 
 It does not uninstall software.
+
+---
+
+## Line endings
+
+This package keeps text files as LF with `.gitattributes`:
+
+```text
+* text=auto eol=lf
+```
+
+If Windows editing adds CRLF to shell files, run:
+
+```bash
+python3 init-config.py
+```
+
+It normalizes config files before applying hooks.
 
 ---
 

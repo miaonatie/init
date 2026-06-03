@@ -859,16 +859,16 @@ def menu() -> Choices:
         print("  Ubuntu universe is hidden on this distro; APT sources are not changed.")
 
     i = 0
-    last_cat = None
+    printed_categories: set[str] = set()
     while True:
         v = visible()
         if i >= len(v):
             break
         cat, key, label, desc, _, _ = v[i]
-        if cat != last_cat:
+        if cat not in printed_categories:
             print()
             print(ui.bold + ui.blue + f"[{cat}]" + ui.reset)
-            last_cat = cat
+            printed_categories.add(cat)
         print(ui.dim + f"  {desc}" + ui.reset)
         default = bool(getattr(c, key))
         ans = ui.ask_key(f"  [{i + 1:02d}/{len(v):02d}] {label}", default)
@@ -877,7 +877,6 @@ def menu() -> Choices:
         if ans == "back":
             if i > 0:
                 i -= 1
-                last_cat = None
             else:
                 ui.warn("already at first item")
             continue
