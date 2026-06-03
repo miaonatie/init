@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "v1.0.3"
+VERSION = "v1.0.4"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
@@ -239,15 +239,14 @@ def help_text() -> str:
 init-config {VERSION}
 
 Usage:
-  python3 init-config.py           Apply ./config to shell, GDB, and tmux
-  python3 init-config.py --test    Check config files and applied hooks
-  python3 init-config.py --clean   Remove init hooks; keep files and software
-  python3 init-config.py --paths   Show editable config files
+  python3 init-config.py           Apply ./config
+  python3 init-config.py --test    Check config hooks
+  python3 init-config.py --clean   Remove config hooks
+  python3 init-config.py --paths   Show editable files
+  python3 init-config.py --version Show version
   python3 init-config.py -h        Show help
 
-Notes:
-  - Edit files under ./config/ directly.
-  - Rerun this script after moving the package directory.
+Edit ./config/ directly. Rerun after moving this directory.
 """.strip()
 
 
@@ -255,22 +254,26 @@ def main(argv: list[str]) -> int:
     if not argv:
         apply()
         return 0
-    cmd = argv[0]
-    if cmd in {"-h", "--help"}:
+    if len(argv) != 1:
+        err("use only one option at a time")
+        print(help_text())
+        return 2
+    opt = argv[0]
+    if opt in {"-h", "--help"}:
         print(help_text())
         return 0
-    if cmd == "--version":
+    if opt == "--version":
         print(VERSION)
         return 0
-    if cmd == "--test":
+    if opt == "--test":
         return test_config()
-    if cmd == "--clean":
+    if opt == "--clean":
         clean()
         return 0
-    if cmd == "--paths":
+    if opt == "--paths":
         paths()
         return 0
-    err(f"unknown command: {cmd}")
+    err(f"unknown option: {opt}")
     print(help_text())
     return 2
 

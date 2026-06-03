@@ -21,7 +21,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
-VERSION = "v1.0.3"
+VERSION = "v1.0.4"
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
 
@@ -100,6 +100,7 @@ class UI:
         color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
         self.reset = "\033[0m" if color else ""
         self.bold = "\033[1m" if color else ""
+        self.dim = "\033[2m" if color else ""
         self.blue = "\033[34m" if color else ""
         self.cyan = "\033[36m" if color else ""
         self.green = "\033[32m" if color else ""
@@ -796,39 +797,119 @@ Acquire::IndexTargets::deb::Contents-udeb::DefaultEnabled \"false\";
 
 
 def menu() -> Choices:
-    ui = UI(); c = Choices()
+    ui = UI()
+    c = Choices()
+    distro = Installer(Choices(), no_config=True).distro
+
+    def yes_if(cond):
+        return lambda _: cond
+
     items = [
-        ("chsrc", "optional chsrc mirror switch", False),
-        ("extra_apt_repo", "extra APT repo where safe (Ubuntu universe)", True),
-        ("apt_upgrade", "apt full-upgrade", True),
-        ("core_apt", "core APT tools", True),
-        ("i386", "i386 / multilib", True),
-        ("qemu", "qemu-user", True),
-        ("language_env", "Ruby / Rust / Go / Java runtime", True),
-        ("shell_ui", "zsh / oh-my-zsh / hyfetch", True),
-        ("modern_cli", "bat/eza/fzf/btop/duf", True),
-        ("trashy", "trashy", True),
-        ("codex_cli", "Codex CLI", True),
-        ("claude_code", "Claude Code", True),
-        ("cc_switch", "cc-switch-cli", True),
-        ("python_pwn", "Python pwn packages", True),
-        ("ruby_tools", "one_gadget / seccomp-tools", True),
-        ("pwndbg", "pwndbg", True),
-        ("helper_repos", "glibc-all-in-one / libc-database", True),
-        ("libc_get_common", "download common libc-database data", False),
-        ("libc_get_all", "download all libc-database data", False),
-        ("glibc_download", "download specific glibc versions", False),
+        ("System", "chsrc", "Mirror switch with chsrc", "Optional. Use only when default mirrors are slow.", False, yes_if(True)),
+        ("System", "extra_apt_repo", "Enable Ubuntu universe", "Ubuntu only.", True, yes_if(distro.id == "ubuntu")),
+        ("System", "apt_upgrade", "APT full-upgrade", "Update system packages before installing tools.", True, yes_if(True)),
+
+        ("Core", "core_apt", "Core build/debug/pwn tools", "gcc, gdb, checksec, patchelf, binutils, seccomp.", True, yes_if(True)),
+        ("Core", "i386", "i386 / multilib support", "For 32-bit ELF challenges.", True, yes_if(True)),
+        ("Core", "qemu", "qemu-user multi-arch support", "For foreign-architecture ELF challenges.", True, yes_if(True)),
+        ("Core", "language_env", "Ruby / Rust / Go / Java", "Runtime support for common tools.", True, yes_if(True)),
+
+        ("Shell", "shell_ui", "zsh / oh-my-zsh / hyfetch", "Terminal UI helpers.", True, yes_if(True)),
+        ("Shell", "modern_cli", "bat / eza / fzf / btop / duf", "Daily CLI tools.", True, yes_if(True)),
+        ("Shell", "trashy", "trashy recycle-bin command", "Safe rm-like workflow with trash put/list/restore.", True, yes_if(True)),
+
+        ("AI", "codex_cli", "Codex CLI", "OpenAI Codex CLI with nvm / pnpm.", True, yes_if(True)),
+        ("AI", "claude_code", "Claude Code", "Anthropic Claude Code CLI.", True, yes_if(True)),
+        ("AI", "cc_switch", "cc-switch-cli", "CLI profile switch helper.", True, yes_if(True)),
+
+        ("Pwn", "python_pwn", "Python pwn packages", "pwntools, ROPgadget, ropper, z3, lief, etc.", True, yes_if(True)),
+        ("Pwn", "ruby_tools", "one_gadget / seccomp-tools", "Ruby-based pwn helpers.", True, yes_if(True)),
+        ("Pwn", "pwndbg", "pwndbg", "GDB plugin for pwn debugging.", True, yes_if(True)),
+        ("Pwn", "helper_repos", "glibc helper repositories", "glibc-all-in-one and libc-database.", True, yes_if(True)),
+
+        ("Libc data", "libc_get_common", "Download common libc-database data", "Optional. Takes extra time and disk space.", False, lambda x: x.helper_repos),
+        ("Libc data", "libc_get_all", "Download all libc-database data", "Large download. Usually not needed.", False, lambda x: x.helper_repos),
+        ("Libc data", "glibc_download", "Download specific glibc versions", "Enter versions after the menu.", False, lambda x: x.helper_repos),
     ]
-    print("Menu: Enter=default, y/n, q=quit")
-    for idx, (key, label, default) in enumerate(items, 1):
+
+    for _, key, _, _, default, _ in items:
         setattr(c, key, default)
-        ans = ui.ask_key(f"[{idx}/{len(items)}] {label}", default)
-        if ans == "quit": raise KeyboardInterrupt
+    if distro.id != "ubuntu":
+        c.extra_apt_repo = False
+
+    def visible():
+        return [item for item in items if item[5](c)]
+
+    def cleanup(key: str) -> None:
+        if key == "helper_repos" and not c.helper_repos:
+            c.libc_get_common = False
+            c.libc_get_all = False
+            c.glibc_download = False
+            c.glibc_versions = []
+        if key == "libc_get_common" and c.libc_get_common:
+            c.libc_get_all = False
+        if key == "libc_get_all" and c.libc_get_all:
+            c.libc_get_common = False
+        if key == "glibc_download" and not c.glibc_download:
+            c.glibc_versions = []
+
+    print(ui.cyan + "Interactive install menu" + ui.reset)
+    print("  Enter/Space=default   y=yes   n=no   b=back   q=quit")
+    if distro.id != "ubuntu":
+        print("  Ubuntu universe is hidden on this distro; APT sources are not changed.")
+
+    i = 0
+    last_cat = None
+    while True:
+        v = visible()
+        if i >= len(v):
+            break
+        cat, key, label, desc, _, _ = v[i]
+        if cat != last_cat:
+            print()
+            print(ui.bold + ui.blue + f"[{cat}]" + ui.reset)
+            last_cat = cat
+        print(ui.dim + f"  {desc}" + ui.reset)
+        default = bool(getattr(c, key))
+        ans = ui.ask_key(f"  [{i + 1:02d}/{len(v):02d}] {label}", default)
+        if ans == "quit":
+            raise KeyboardInterrupt
+        if ans == "back":
+            if i > 0:
+                i -= 1
+                last_cat = None
+            else:
+                ui.warn("already at first item")
+            continue
         setattr(c, key, ans == "yes")
+        cleanup(key)
+        i += 1
+
     if c.glibc_download:
         raw = input("glibc versions, separated by comma/space: ").strip()
         c.glibc_versions = [x for x in re.split(r"[,\s]+", raw) if x]
-    if c.libc_get_common: c.libc_get_all = False
+
+    print()
+    print(ui.cyan + "Selected modules" + ui.reset)
+    selected = []
+    for cat, key, label, _, _, cond in items:
+        if cond(c) and bool(getattr(c, key)):
+            selected.append((cat, label))
+    if not selected:
+        print("  none")
+    else:
+        cur = None
+        for cat, label in selected:
+            if cat != cur:
+                print(f"  {cat}:")
+                cur = cat
+            print(f"    - {label}")
+    if c.glibc_versions:
+        print("    - glibc versions: " + ", ".join(c.glibc_versions))
+
+    ans = ui.ask_key("Start install with this selection", True)
+    if ans in {"quit", "no"}:
+        raise KeyboardInterrupt
     return c
 
 
@@ -837,16 +918,14 @@ def help_text() -> str:
 init-install {VERSION}
 
 Usage:
-  python3 init-install.py              Full install, then apply config
-  python3 init-install.py --menu       Choose install modules interactively
-  python3 init-install.py --no-config  Install software only
-  python3 init-install.py --test       Check software and config
+  python3 init-install.py              Install tools, then apply config
+  python3 init-install.py --menu       Interactive install menu
+  python3 init-install.py --no-config  Install tools only
+  python3 init-install.py --test       Check tools and config
+  python3 init-install.py --version    Show version
   python3 init-install.py -h           Show help
 
-Notes:
-  - Designed for a fresh WSL/Kali/Debian/Ubuntu pwn environment.
-  - It is safe to rerun: installed items are skipped or updated when possible.
-  - Editable config lives in ./config/.
+Config files live in ./config/.
 """.strip()
 
 
