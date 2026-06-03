@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "v1.0.4"
+VERSION = "v1.0.5"
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config"
 STATE = ROOT / "state"
@@ -50,7 +50,34 @@ def read_text(path: Path) -> str:
 
 def write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def has_crlf(path: Path) -> bool:
+    try:
+        return b"\r\n" in path.read_bytes()
+    except OSError:
+        return False
+
+
+def normalize_lf(path: Path) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    fixed = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if fixed != data:
+        path.write_bytes(fixed)
+        return True
+    return False
+
+
+def normalize_config_files() -> list[Path]:
+    changed: list[Path] = []
+    for path in required_files() + [CONFIG / "shell.sh", CONFIG / "pwnnew.sh"]:
+        if path.exists() and normalize_lf(path):
+            changed.append(path)
+    return sorted(set(changed))
 
 
 def remove_blocks(path: Path) -> bool:
@@ -91,8 +118,21 @@ def require_config() -> None:
 def shell_hook() -> str:
     root = shlex.quote(str(ROOT))
     return f"""export INIT_HOME={root}
-[ -f "$INIT_HOME/config/shell.sh" ] && . "$INIT_HOME/config/shell.sh"
-[ -f "$INIT_HOME/config/pwnnew.sh" ] && . "$INIT_HOME/config/pwnnew.sh"
+init_source() {{
+  [ -f "$1" ] || return 0
+  if command -v grep >/dev/null 2>&1 && command -v tr >/dev/null 2>&1 && grep -q "$(printf '\r')" "$1" 2>/dev/null; then
+    local tmp
+    tmp="$(mktemp "${{TMPDIR:-/tmp}}/init-source.XXXXXX")" || return 1
+    tr -d '\r' < "$1" > "$tmp"
+    . "$tmp"
+    rm -f "$tmp"
+  else
+    . "$1"
+  fi
+}}
+init_source "$INIT_HOME/config/shell.sh"
+init_source "$INIT_HOME/config/pwnnew.sh"
+unset -f init_source
 """
 
 
@@ -114,9 +154,12 @@ def apply_tmux() -> None:
 
 def apply() -> None:
     require_config()
+    normalized = normalize_config_files()
     print(color("36", f"init-config {VERSION}"))
     print(f"package: {ROOT}")
     print(f"config : {CONFIG}")
+    if normalized:
+        print("line endings: normalized to LF")
     print()
     apply_shell()
     apply_gdb()
@@ -189,7 +232,10 @@ def test_config() -> int:
     print("Config source files:")
     for p in required_files():
         if p.exists():
-            ok(str(p.relative_to(ROOT)))
+            if has_crlf(p):
+                warn(f"{p.relative_to(ROOT)} uses CRLF; run init-config.py to normalize")
+            else:
+                ok(str(p.relative_to(ROOT)))
         else:
             err(f"missing: {p.relative_to(ROOT)}")
             ok_all = False

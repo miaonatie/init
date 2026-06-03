@@ -1,4 +1,4 @@
-# init v1.0.4
+# init v1.0.5
 
 Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
 
@@ -9,12 +9,14 @@ init-config.py    apply config from ./config
 
 Edit files under `config/` directly. The package directory is the config source.
 
+Linux shell files are kept as LF. If Windows editing adds CRLF, run `python3 init-config.py` once to normalize them.
+
 ---
 
 ## Quick start
 
 ```bash
-cd init-v1.0.4
+cd init-v1.0.5
 python3 init-install.py
 ```
 
@@ -60,10 +62,11 @@ python3 init-config.py --paths
 ## Files
 
 ```text
-init-v1.0.4/
+init-v1.0.5/
 ├── VERSION
 ├── README.md
 ├── .gitignore
+├── .gitattributes
 ├── init-install.py
 ├── init-config.py
 └── config/
