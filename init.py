@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import shlex
 import shutil
 import stat
@@ -21,8 +20,6 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
-CONFIG_SOURCE = ROOT / "config"
-CONFIG_TARGET = HOME / ".config" / "init"
 TOOLS_DIR = HOME / "tools"
 VERSION_FILE = ROOT / "VERSION"
 VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev"
@@ -529,104 +526,6 @@ class Bootstrap:
         self.install_remote_tool("claude", ["claude"])
         self.install_remote_tool("cc-switch", ["cc-switch"])
 
-    @staticmethod
-    def atomic_write(path: Path, content: str, mode: int | None = None) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        current_mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else (mode or 0o644)
-        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            temporary.chmod(current_mode)
-            os.replace(temporary, path)
-        finally:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
-
-    @staticmethod
-    def block_pattern(name: str) -> re.Pattern[str]:
-        escaped = re.escape(name)
-        return re.compile(
-            rf"(?ms)^# >>> {escaped} >>>\n.*?^# <<< {escaped} <<<\n?"
-        )
-
-    def backup_once(self, path: Path) -> None:
-        if not path.exists():
-            return
-        backup = path.with_name(path.name + ".init.bak")
-        if not backup.exists():
-            shutil.copy2(path, backup)
-
-    def upsert_block(self, path: Path, name: str, body: str) -> None:
-        self.backup_once(path)
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-        current = self.block_pattern(name).sub("", current).rstrip()
-        block = f"# >>> {name} >>>\n{body.rstrip()}\n# <<< {name} <<<\n"
-        self.atomic_write(path, f"{current}\n\n{block}" if current else block)
-
-    def remove_block(self, path: Path, name: str) -> bool:
-        if not path.exists():
-            return False
-        current = path.read_text(encoding="utf-8")
-        updated = self.block_pattern(name).sub("", current).rstrip()
-        if updated == current.rstrip():
-            return False
-        self.atomic_write(path, updated + ("\n" if updated else ""))
-        return True
-
-    def sync_config(self) -> None:
-        sources = {
-            "shell.sh": CONFIG_SOURCE / "shell.sh",
-            "gdbinit": CONFIG_SOURCE / "gdbinit",
-            "tmux.conf": CONFIG_SOURCE / "tmux.conf",
-        }
-        missing = [str(path) for path in sources.values() if not path.is_file()]
-        if missing:
-            self.failures.append("missing configuration files: " + ", ".join(missing))
-            return
-        for name, source in sources.items():
-            content = source.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
-            self.atomic_write(CONFIG_TARGET / name, content)
-
-        shell_path = shlex.quote(str(CONFIG_TARGET / "shell.sh"))
-        self.upsert_block(HOME / ".bashrc", "init-shell", f"[ -f {shell_path} ] && . {shell_path}")
-        self.upsert_block(HOME / ".zshrc", "init-shell", f"[ -f {shell_path} ] && . {shell_path}")
-        self.upsert_block(HOME / ".gdbinit", "init-gdb", f"source {CONFIG_TARGET / 'gdbinit'}")
-        self.upsert_block(HOME / ".tmux.conf", "init-tmux", f"source-file \"{CONFIG_TARGET / 'tmux.conf'}\"")
-        self.ok(f"configuration synced to {CONFIG_TARGET}")
-
-    def clean(self) -> int:
-        self.step = 0
-        self.step_total = 1
-        self.section("Remove configuration")
-        targets = [
-            (HOME / ".bashrc", "init-shell"),
-            (HOME / ".zshrc", "init-shell"),
-            (HOME / ".gdbinit", "init-gdb"),
-            (HOME / ".tmux.conf", "init-tmux"),
-        ]
-        changed = False
-        for path, name in targets:
-            if self.remove_block(path, name):
-                changed = True
-                self.ok(f"removed hook: {path}")
-        if CONFIG_TARGET.is_symlink():
-            CONFIG_TARGET.unlink()
-            changed = True
-            self.ok(f"removed managed config link: {CONFIG_TARGET}")
-        elif CONFIG_TARGET.exists():
-            shutil.rmtree(CONFIG_TARGET)
-            changed = True
-            self.ok(f"removed managed config: {CONFIG_TARGET}")
-        if not changed:
-            self.ok("nothing to clean")
-        return 0
-
     def find_command(self, names: list[str]) -> str | None:
         self._extend_path()
         for name in names:
@@ -665,23 +564,6 @@ class Bootstrap:
                     self.failures.append(message)
                 self.error(message)
 
-        config_checks = [
-            (HOME / ".bashrc", "init-shell"),
-            (HOME / ".zshrc", "init-shell"),
-            (HOME / ".gdbinit", "init-gdb"),
-            (HOME / ".tmux.conf", "init-tmux"),
-        ]
-        for path, name in config_checks:
-            try:
-                present = bool(self.block_pattern(name).search(path.read_text(encoding="utf-8")))
-            except OSError:
-                present = False
-            if not present:
-                ok_all = False
-                message = f"configuration hook missing: {path}"
-                if message not in self.failures:
-                    self.failures.append(message)
-                self.error(message)
         return ok_all
 
     def summary(self) -> int:
@@ -696,7 +578,7 @@ class Bootstrap:
                 print(f"  - {item}")
             self.error(f"completed with {len(self.failures)} failure(s) in {elapsed}")
             return 1
-        self.ok(f"installation, configuration, and verification completed in {elapsed}")
+        self.ok(f"installation and verification completed in {elapsed}")
         return 0
 
     def install(self) -> int:
@@ -706,8 +588,7 @@ class Bootstrap:
         self.install_system_packages()
         self.install_pwn_tools()
         self.install_ai_tools()
-        self.section("Configuration and verification")
-        self.sync_config()
+        self.section("Verification")
         self.verify()
         return self.summary()
 
@@ -716,8 +597,7 @@ def help_text() -> str:
     return f"""init {VERSION}
 
 Usage:
-  python3 init.py          Install, repair, configure, and verify
-  python3 init.py --clean  Remove managed configuration hooks
+  python3 init.py          Install and verify
   python3 init.py --help   Show this help
 
 The default operation is safe to rerun. It does not run full-upgrade or autoremove.
@@ -729,8 +609,6 @@ def main(argv: list[str]) -> int:
         print(help_text())
         return 0
     bootstrap = Bootstrap()
-    if argv == ["--clean"]:
-        return bootstrap.clean()
     if argv:
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
