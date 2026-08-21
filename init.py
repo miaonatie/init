@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shlex
 import shutil
 import stat
@@ -46,6 +47,7 @@ REQUIRED_APT = [
     "socat", "netcat-openbsd", "openssh-client",
     "build-essential", "clang", "llvm", "lld", "libssl-dev", "libffi-dev", "libc6-dev",
     "libbz2-dev", "libreadline-dev", "libsqlite3-dev", "liblzma-dev", "libncurses-dev",
+    "zlib1g-dev",
     "autoconf", "automake", "libtool", "cmake", "ninja-build", "meson",
     "gawk", "bison", "flex", "gettext", "patch", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
@@ -78,16 +80,30 @@ I386_APT = [
     "gcc-multilib", "g++-multilib", "libc6-i386", "libc6-dev-i386", "libc6-dbg:i386",
 ]
 
-PYTHON_PACKAGES = [
-    "pwntools", "ROPgadget", "ropper", "capstone", "unicorn", "keystone-engine",
-    "z3-solver", "pyelftools", "lief", "Pillow", "pycryptodome", "gmpy2", "sympy",
-    "oletools", "volatility3", "python-magic",
-]
+PYTHON_IMPORT_PACKAGES = {
+    "pwntools": "pwn",
+    "capstone": "capstone",
+    "unicorn": "unicorn",
+    "keystone-engine": "keystone",
+    "z3-solver": "z3",
+    "pyelftools": "elftools",
+    "lief": "lief",
+    "Pillow": "PIL",
+    "pycryptodome": "Crypto",
+    "gmpy2": "gmpy2",
+    "sympy": "sympy",
+    "oletools": "oletools",
+    "volatility3": "volatility3",
+    "python-magic": "magic",
+}
 
-PYTHON_IMPORTS = [
-    "pwn", "capstone", "unicorn", "keystone", "z3", "elftools", "lief",
-    "PIL", "Crypto", "gmpy2", "sympy", "oletools", "volatility3", "magic",
-]
+PYTHON_COMMAND_PACKAGES = {
+    "ROPgadget": ("ROPgadget", "ropgadget"),
+    "ropper": ("ropper",),
+}
+
+PYTHON_PACKAGES = [*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]
+PYTHON_IMPORTS = list(PYTHON_IMPORT_PACKAGES.values())
 
 RUBY_GEMS = ["one_gadget", "seccomp-tools", "zsteg"]
 
@@ -102,6 +118,22 @@ REMOTE_INSTALLERS = {
 
 ALLOWED_INSTALLER_HOSTS = {"install.pwndbg.re"}
 
+PYTHON2_VERSION = "2.7.18"
+PYENV_URL = "https://github.com/pyenv/pyenv.git"
+
+DOCKER_PACKAGES = [
+    "docker-ce", "docker-ce-cli", "containerd.io",
+    "docker-buildx-plugin", "docker-compose-plugin",
+]
+
+DOCKER_CONFLICTS = [
+    "docker.io", "docker-compose", "docker-doc", "docker-buildx",
+    "podman-docker", "containerd", "runc",
+]
+
+DOCKER_KEYRING = Path("/etc/apt/keyrings/docker.asc")
+DOCKER_SOURCE = Path("/etc/apt/sources.list.d/docker.sources")
+
 
 class Bootstrap:
     def __init__(self) -> None:
@@ -111,6 +143,7 @@ class Bootstrap:
         self.step = 0
         self.step_total = 4
         self.apt_updated = False
+        self._package_cache: dict[str, bool] = {}
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
         self.is_wsl = self.detect_wsl()
@@ -152,7 +185,13 @@ class Bootstrap:
 
     @staticmethod
     def detect_distro() -> dict[str, str]:
-        result: dict[str, str] = {"id": "unknown", "name": "Unknown Linux", "version": ""}
+        result: dict[str, str] = {
+            "id": "unknown",
+            "name": "Unknown Linux",
+            "version": "",
+            "codename": "",
+            "ubuntu_codename": "",
+        }
         try:
             for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
                 if "=" not in line:
@@ -165,6 +204,10 @@ class Bootstrap:
                     result["name"] = value
                 elif key == "VERSION_ID":
                     result["version"] = value
+                elif key == "VERSION_CODENAME":
+                    result["codename"] = value.lower()
+                elif key == "UBUNTU_CODENAME":
+                    result["ubuntu_codename"] = value.lower()
         except OSError:
             pass
         return result
@@ -285,22 +328,43 @@ class Bootstrap:
         self.require_sudo()
         free = shutil.disk_usage(HOME).free
         free_gib = free / (1024 ** 3)
-        if free_gib < 1:
+        minimum_gib, recommended_gib = self.installation_space_limits()
+        if free_gib < minimum_gib:
             raise RuntimeError(f"not enough free disk space: {free_gib:.1f} GiB")
-        if free_gib < 3:
-            self.warn(f"low disk space: {free_gib:.1f} GiB free; 3 GiB or more is recommended")
+        if free_gib < recommended_gib:
+            self.warn(
+                f"low disk space: {free_gib:.1f} GiB free; "
+                f"{recommended_gib} GiB or more is recommended"
+            )
         self.ok(
             f"{self.distro['name']} | {self.arch} | WSL={'yes' if self.is_wsl else 'no'} "
             f"| free={free_gib:.1f} GiB"
         )
 
     def package_installed(self, package: str) -> bool:
+        if package in self._package_cache:
+            return self._package_cache[package]
         result = self.run(
             ["dpkg-query", "-W", "-f=${Status}", package],
             capture=True,
             check=False,
         )
-        return result.returncode == 0 and "install ok installed" in (result.stdout or "")
+        installed = result.returncode == 0 and "install ok installed" in (result.stdout or "")
+        self._package_cache[package] = installed
+        return installed
+
+    def planned_apt_packages(self) -> list[str]:
+        distro_packages = KALI_APT if self.distro["id"] == "kali" else []
+        i386 = I386_APT if self.arch in {"x86_64", "amd64"} else []
+        return list(dict.fromkeys([*REQUIRED_APT, *DAILY_APT, *CTF_APT, *distro_packages, *i386]))
+
+    def installation_space_limits(self) -> tuple[int, int]:
+        missing = sum(not self.package_installed(package) for package in self.planned_apt_packages())
+        if missing >= 10:
+            return 10, 15
+        if missing or self.existing_python2() is None or not self.docker_ready():
+            return 3, 5
+        return 1, 3
 
     def apt_update(self, *, force: bool = False) -> bool:
         if self.apt_updated and not force:
@@ -366,6 +430,7 @@ class Bootstrap:
             network=True,
             env=self.apt_env(),
         )
+        self._package_cache.clear()
         if result.returncode == 0:
             return True
 
@@ -382,6 +447,7 @@ class Bootstrap:
                 network=True,
                 env=self.apt_env(),
             )
+            self._package_cache[package] = result.returncode == 0
             if result.returncode != 0:
                 ok_all = False
                 message = f"APT package failed: {package}"
@@ -391,7 +457,9 @@ class Bootstrap:
     def install_system_packages(self) -> None:
         self.section("System packages")
         if self.distro["id"] == "ubuntu":
-            if self.apt_install(
+            if self.ubuntu_universe_enabled():
+                self.ok("Ubuntu universe repository: already enabled")
+            elif self.apt_install(
                 ["software-properties-common"],
                 "Ubuntu repository support",
                 required=True,
@@ -414,9 +482,32 @@ class Bootstrap:
             required=True,
         )
         self.install_command_links()
+        self.install_docker()
+
+    @staticmethod
+    def ubuntu_universe_enabled() -> bool:
+        paths = [Path("/etc/apt/sources.list")]
+        paths.extend(Path("/etc/apt/sources.list.d").glob("*.list"))
+        paths.extend(Path("/etc/apt/sources.list.d").glob("*.sources"))
+        for path in paths:
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("Components:") and "universe" in line.split()[1:]:
+                    return True
+                if line.startswith("deb ") and "universe" in line.split():
+                    return True
+        return False
 
     def install_command_links(self) -> None:
         for source, target in (("batcat", "bat"), ("fdfind", "fd"), ("7zz", "7z")):
+            if shutil.which(target):
+                continue
             executable = shutil.which(source)
             if executable is None:
                 continue
@@ -428,12 +519,236 @@ class Bootstrap:
             if result.returncode != 0:
                 self.skipped.append(f"command link failed: {target}")
 
+    def docker_repository(self) -> tuple[str, str]:
+        if self.distro["id"] == "kali":
+            return "debian", "trixie"
+        suite = self.distro.get("ubuntu_codename") or self.distro.get("codename")
+        if not suite and self.distro.get("version") == "24.04":
+            suite = "noble"
+        if not suite or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", suite):
+            raise RuntimeError("could not determine the Ubuntu codename for Docker")
+        return "ubuntu", suite
+
+    def docker_ready(self) -> bool:
+        if not all(self.command_exists(command) for command in ("docker", "containerd")):
+            return False
+        for command in (
+            ["docker", "--version"],
+            ["docker", "buildx", "version"],
+            ["docker", "compose", "version"],
+            ["containerd", "--version"],
+        ):
+            if self.run(command, check=False, capture=True, timeout=30).returncode != 0:
+                return False
+        return True
+
+    def setup_docker_repository(self) -> bool:
+        family, suite = self.docker_repository()
+        architecture = self.run(
+            ["dpkg", "--print-architecture"], check=False, capture=True
+        ).stdout.strip()
+        if not architecture:
+            self.failures.append("Docker repository setup failed: unknown architecture")
+            return False
+        source = (
+            "Types: deb\n"
+            f"URIs: https://download.docker.com/linux/{family}\n"
+            f"Suites: {suite}\n"
+            "Components: stable\n"
+            f"Architectures: {architecture}\n"
+            f"Signed-By: {DOCKER_KEYRING}\n"
+        )
+        try:
+            current = DOCKER_SOURCE.read_text(encoding="utf-8")
+        except OSError:
+            current = ""
+        if DOCKER_KEYRING.exists() and current == source:
+            self.ok("Docker repository: already configured")
+            return True
+
+        key_file: Path | None = None
+        source_file: Path | None = None
+        try:
+            key_handle = tempfile.NamedTemporaryFile(prefix="init-docker-key-", delete=False)
+            key_handle.close()
+            key_file = Path(key_handle.name)
+            result = self.run(
+                [
+                    "curl", "-fsSL",
+                    f"https://download.docker.com/linux/{family}/gpg",
+                    "-o", str(key_file),
+                ],
+                check=False,
+                network=True,
+                timeout=60,
+            )
+            if result.returncode != 0 or key_file.stat().st_size < 100:
+                self.failures.append("Docker repository key download failed")
+                return False
+
+            source_handle = tempfile.NamedTemporaryFile(
+                mode="w", prefix="init-docker-source-", encoding="utf-8", delete=False
+            )
+            try:
+                source_handle.write(source)
+                source_file = Path(source_handle.name)
+            finally:
+                source_handle.close()
+
+            commands = (
+                ["install", "-m", "0755", "-d", str(DOCKER_KEYRING.parent)],
+                ["install", "-m", "0644", str(key_file), str(DOCKER_KEYRING)],
+                ["install", "-m", "0644", str(source_file), str(DOCKER_SOURCE)],
+            )
+            for command in commands:
+                result = self.run(command, sudo=True, check=False)
+                if result.returncode != 0:
+                    self.failures.append("Docker repository setup failed")
+                    return False
+            self.apt_updated = False
+            return True
+        except OSError as exc:
+            self.failures.append(f"Docker repository setup failed: {exc}")
+            return False
+        finally:
+            for path in (key_file, source_file):
+                if path is not None:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+
+    def install_docker(self) -> None:
+        if self.docker_ready():
+            self.ok("Docker Engine, Buildx and Compose: already installed")
+            return
+        if not self.setup_docker_repository():
+            return
+
+        conflicts = [package for package in DOCKER_CONFLICTS if self.package_installed(package)]
+        if conflicts:
+            self.info("replacing conflicting Docker packages: " + ", ".join(conflicts))
+            result = self.run(
+                ["apt-get", *self.apt_options(), "remove", "-y", *conflicts],
+                sudo=True,
+                check=False,
+                network=True,
+                env=self.apt_env(),
+            )
+            self._package_cache.clear()
+            if result.returncode != 0:
+                self.failures.append("failed to remove conflicting Docker packages")
+                return
+
+        if not self.apt_install(DOCKER_PACKAGES, "Docker CE", required=True):
+            return
+        if self.docker_ready():
+            self.ok("Docker Engine, Buildx and Compose installed")
+        else:
+            self.failures.append("Docker installation failed verification")
+
+    def python2_prefix(self) -> Path:
+        return TOOLS_DIR / "pyenv" / "versions" / PYTHON2_VERSION
+
+    def valid_python2(self, executable: Path | str) -> bool:
+        result = self.run(
+            [str(executable), "--version"], check=False, capture=True, timeout=30
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        return result.returncode == 0 and output.strip().startswith("Python 2.7.")
+
+    def existing_python2(self) -> Path | None:
+        candidates = [shutil.which("python2"), str(self.python2_prefix() / "bin" / "python2.7")]
+        for candidate in candidates:
+            if candidate and Path(candidate).exists() and self.valid_python2(candidate):
+                return Path(candidate)
+        return None
+
+    def install_python2_legacy(self) -> None:
+        existing = self.existing_python2()
+        if existing is not None:
+            self.ok(f"Python 2 legacy runtime: already installed ({existing})")
+            return
+        if not self.clone_or_update("pyenv", PYENV_URL):
+            self.failures.append("Python 2 legacy runtime installation failed")
+            return
+
+        pyenv = TOOLS_DIR / "pyenv" / "bin" / "pyenv"
+        env = {"PYENV_ROOT": str(TOOLS_DIR / "pyenv"), "CFLAGS": "-std=c11"}
+        result = self.run(
+            [str(pyenv), "install", "-s", PYTHON2_VERSION],
+            check=False,
+            network=True,
+            timeout=1800,
+            env=env,
+        )
+        python2 = self.python2_prefix() / "bin" / "python2.7"
+        if result.returncode != 0 or not python2.exists() or not self.valid_python2(python2):
+            self.failures.append("Python 2 legacy runtime installation failed")
+            return
+
+        pip_check = self.run(
+            [str(python2), "-m", "pip", "--version"], check=False, capture=True, timeout=30
+        )
+        if pip_check.returncode != 0:
+            ensurepip = self.run(
+                [str(python2), "-m", "ensurepip", "--upgrade"],
+                check=False,
+                timeout=300,
+            )
+            if ensurepip.returncode != 0:
+                self.failures.append("Python 2 pip installation failed")
+                return
+
+        links = [(python2, "python2"), (python2, "python2.7")]
+        pip2 = self.python2_prefix() / "bin" / "pip2"
+        if not pip2.exists():
+            pip2 = self.python2_prefix() / "bin" / "pip2.7"
+        if pip2.exists():
+            links.append((pip2, "pip2"))
+        for source, name in links:
+            result = self.run(
+                ["ln", "-sf", str(source), f"/usr/local/bin/{name}"],
+                sudo=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                self.failures.append(f"Python 2 command link failed: {name}")
+                return
+        self.ok("Python 2.7.18 legacy runtime installed without changing system Python")
+
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        probe = self.run(
+            [
+                python,
+                "-c",
+                "import importlib.util; print('\\n'.join(m for m in "
+                + repr(PYTHON_IMPORTS)
+                + " if importlib.util.find_spec(m) is None))",
+            ],
+            check=False,
+            capture=True,
+        )
+        if probe.returncode == 0:
+            missing_modules = set((probe.stdout or "").splitlines())
+            missing = [
+                package for package, module in PYTHON_IMPORT_PACKAGES.items()
+                if module in missing_modules
+            ]
+        else:
+            missing = list(PYTHON_IMPORT_PACKAGES)
+        missing.extend(
+            package for package, commands in PYTHON_COMMAND_PACKAGES.items()
+            if not any(self.command_exists(command) for command in commands)
+        )
+        if not missing:
+            self.ok("Python tools: already installed")
+            return
         result = self.run(
             [
                 python, "-m", "pip", "install", "--break-system-packages",
-                "--disable-pip-version-check", *PYTHON_PACKAGES,
+                "--disable-pip-version-check", *missing,
             ],
             sudo=True,
             check=False,
@@ -502,17 +817,7 @@ class Bootstrap:
         destination.parent.mkdir(parents=True, exist_ok=True)
         env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
         if (destination / ".git").exists():
-            result = self.run(
-                ["git", "pull", "--ff-only", "--quiet"],
-                cwd=destination,
-                env=env,
-                check=False,
-                network=True,
-                timeout=180,
-            )
-            if result.returncode != 0:
-                self.failures.append(f"repository update failed: {name}")
-                return False
+            self.ok(f"{name}: already installed")
             return True
         if destination.exists():
             self.failures.append(f"path exists but is not a Git repository: {destination}")
@@ -535,7 +840,8 @@ class Bootstrap:
                 continue
             if name == "glibc-all-in-one":
                 update_list = TOOLS_DIR / name / "update_list"
-                if update_list.exists():
+                libc_list = TOOLS_DIR / name / "list"
+                if update_list.exists() and not (libc_list.exists() and libc_list.stat().st_size > 0):
                     result = self.run(
                         ["bash", "./update_list"],
                         cwd=update_list.parent,
@@ -608,6 +914,7 @@ class Bootstrap:
 
     def install_pwn_tools(self) -> None:
         self.section("Pwn tools")
+        self.install_python2_legacy()
         self.install_python_tools()
         self.install_ruby_tools()
         self.install_r2ghidra()
@@ -625,6 +932,7 @@ class Bootstrap:
     def verify(self) -> bool:
         checks = [
             ("python3", ["python3"]),
+            ("python2", ["python2"]),
             ("git", ["git"]),
             ("gcc", ["gcc"]),
             ("g++", ["g++"]),
@@ -660,6 +968,8 @@ class Bootstrap:
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
             ("one_gadget", ["one_gadget"]),
             ("seccomp-tools", ["seccomp-tools"]),
+            ("docker", ["docker"]),
+            ("containerd", ["containerd"]),
         ]
         ok_all = True
         for label, names in checks:
@@ -672,6 +982,25 @@ class Bootstrap:
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
+
+        python2 = self.existing_python2()
+        if python2 is not None:
+            self.ok(f"Python 2.7 legacy runtime: {python2}")
+        else:
+            ok_all = False
+            message = "verification failed: working Python 2.7 runtime not found"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.docker_ready():
+            self.ok("Docker Engine, Buildx and Compose")
+        else:
+            ok_all = False
+            message = "verification failed: Docker Engine, Buildx or Compose unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
 
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
         imports = self.run(

@@ -45,21 +45,22 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.bootstrap.run.call_count, MODULE.NETWORK_ATTEMPTS)
         self.assertIn("APT index update failed", self.bootstrap.failures)
 
-    def test_repository_pull_failure_is_not_success(self):
+    def test_existing_repository_is_not_updated(self):
         with tempfile.TemporaryDirectory() as directory:
             tools_dir = Path(directory)
             (tools_dir / "sample" / ".git").mkdir(parents=True)
-            result = subprocess.CompletedProcess(["git", "pull"], 1)
-            self.bootstrap.run = mock.Mock(return_value=result)
+            self.bootstrap.run = mock.Mock()
             with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
-                self.assertFalse(
+                self.assertTrue(
                     self.bootstrap.clone_or_update("sample", "https://github.com/example/sample.git")
                 )
-            self.assertIn("repository update failed: sample", self.bootstrap.failures)
+            self.bootstrap.run.assert_not_called()
+            self.assertEqual(self.bootstrap.failures, [])
 
     def test_python_install_uses_break_system_packages_globally(self):
+        probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
-        self.bootstrap.run = mock.Mock(return_value=install_result)
+        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
         self.bootstrap.install_python_tools()
         install_call = self.bootstrap.run.call_args
         command = install_call.args[0]
@@ -67,6 +68,123 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("--break-system-packages", command)
         self.assertNotIn("venv", command)
         self.assertTrue(install_call.kwargs["sudo"])
+
+    def test_python_install_skips_when_imports_are_present(self):
+        probe_result = subprocess.CompletedProcess(["python3", "-c"], 0, stdout="", stderr="")
+        self.bootstrap.run = mock.Mock(return_value=probe_result)
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.install_python_tools()
+        self.bootstrap.run.assert_called_once()
+
+    def test_python_missing_import_installs_matching_package(self):
+        probe_result = subprocess.CompletedProcess(
+            ["python3", "-c"], 0, stdout="capstone\n", stderr=""
+        )
+        install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
+        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.install_python_tools()
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("capstone", command)
+        self.assertNotIn("ROPgadget", command)
+        self.assertNotIn("ropper", command)
+
+    def test_python2_existing_runtime_is_not_reinstalled(self):
+        self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))
+        self.bootstrap.clone_or_update = mock.Mock()
+        self.bootstrap.install_python2_legacy()
+        self.bootstrap.clone_or_update.assert_not_called()
+
+    def test_python2_pyenv_install_never_changes_global_python(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools_dir = Path(directory)
+            (tools_dir / "pyenv" / "bin").mkdir(parents=True)
+            (tools_dir / "pyenv" / "bin" / "pyenv").touch()
+            runtime_bin = tools_dir / "pyenv" / "versions" / MODULE.PYTHON2_VERSION / "bin"
+            runtime_bin.mkdir(parents=True)
+            (runtime_bin / "python2.7").touch()
+            (runtime_bin / "pip2").touch()
+            self.bootstrap.existing_python2 = mock.Mock(return_value=None)
+            self.bootstrap.clone_or_update = mock.Mock(return_value=True)
+            self.bootstrap.valid_python2 = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["command"], 0, stdout="", stderr="")
+            )
+            with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
+                self.bootstrap.install_python2_legacy()
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertTrue(any(command[1:3] == ["install", "-s"] for command in commands))
+            self.assertFalse(any("global" in command for command in commands))
+
+    def test_docker_repository_targets_ubuntu_and_kali(self):
+        self.bootstrap.distro = {
+            "id": "ubuntu", "version": "24.04", "codename": "noble",
+            "ubuntu_codename": "noble",
+        }
+        self.assertEqual(self.bootstrap.docker_repository(), ("ubuntu", "noble"))
+        self.bootstrap.distro = {
+            "id": "kali", "version": "2026.2", "codename": "kali-rolling",
+            "ubuntu_codename": "",
+        }
+        self.assertEqual(self.bootstrap.docker_repository(), ("debian", "trixie"))
+
+    def test_docker_existing_install_is_skipped(self):
+        self.bootstrap.docker_ready = mock.Mock(return_value=True)
+        self.bootstrap.setup_docker_repository = mock.Mock()
+        self.bootstrap.apt_install = mock.Mock()
+        self.bootstrap.install_docker()
+        self.bootstrap.setup_docker_repository.assert_not_called()
+        self.bootstrap.apt_install.assert_not_called()
+
+    def test_docker_repository_configuration_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            keyring = root / "docker.asc"
+            source_path = root / "docker.sources"
+            keyring.write_bytes(b"x" * 100)
+            source_path.write_text(
+                "Types: deb\n"
+                "URIs: https://download.docker.com/linux/ubuntu\n"
+                "Suites: noble\n"
+                "Components: stable\n"
+                "Architectures: amd64\n"
+                f"Signed-By: {keyring}\n",
+                encoding="utf-8",
+            )
+            self.bootstrap.distro = {
+                "id": "ubuntu", "version": "24.04", "codename": "noble",
+                "ubuntu_codename": "noble",
+            }
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["dpkg"], 0, stdout="amd64\n", stderr="")
+            )
+            with (
+                mock.patch.object(MODULE, "DOCKER_KEYRING", keyring),
+                mock.patch.object(MODULE, "DOCKER_SOURCE", source_path),
+            ):
+                self.assertTrue(self.bootstrap.setup_docker_repository())
+            self.bootstrap.run.assert_called_once()
+
+    def test_docker_package_set_is_complete(self):
+        self.assertEqual(
+            MODULE.DOCKER_PACKAGES,
+            [
+                "docker-ce", "docker-ce-cli", "containerd.io",
+                "docker-buildx-plugin", "docker-compose-plugin",
+            ],
+        )
+
+    def test_disk_limits_scale_with_missing_work(self):
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.assertEqual(self.bootstrap.installation_space_limits(), (10, 15))
+
+        self.bootstrap.package_installed = mock.Mock(return_value=True)
+        self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))
+        self.bootstrap.docker_ready = mock.Mock(return_value=True)
+        self.assertEqual(self.bootstrap.installation_space_limits(), (1, 3))
+
+        self.bootstrap.existing_python2 = mock.Mock(return_value=None)
+        self.assertEqual(self.bootstrap.installation_space_limits(), (3, 5))
 
     def test_progress_output_is_plain_text_when_not_tty(self):
         output = io.StringIO()
