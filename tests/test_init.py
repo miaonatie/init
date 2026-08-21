@@ -72,8 +72,22 @@ class InstallerTests(unittest.TestCase):
     def test_python_install_skips_when_imports_are_present(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 0, stdout="", stderr="")
         self.bootstrap.run = mock.Mock(return_value=probe_result)
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
         self.bootstrap.install_python_tools()
         self.bootstrap.run.assert_called_once()
+
+    def test_python_missing_import_installs_matching_package(self):
+        probe_result = subprocess.CompletedProcess(
+            ["python3", "-c"], 0, stdout="capstone\n", stderr=""
+        )
+        install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
+        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.install_python_tools()
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("capstone", command)
+        self.assertNotIn("ROPgadget", command)
+        self.assertNotIn("ropper", command)
 
     def test_python2_existing_runtime_is_not_reinstalled(self):
         self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))

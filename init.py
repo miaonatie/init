@@ -80,16 +80,30 @@ I386_APT = [
     "gcc-multilib", "g++-multilib", "libc6-i386", "libc6-dev-i386", "libc6-dbg:i386",
 ]
 
-PYTHON_PACKAGES = [
-    "pwntools", "ROPgadget", "ropper", "capstone", "unicorn", "keystone-engine",
-    "z3-solver", "pyelftools", "lief", "Pillow", "pycryptodome", "gmpy2", "sympy",
-    "oletools", "volatility3", "python-magic",
-]
+PYTHON_IMPORT_PACKAGES = {
+    "pwntools": "pwn",
+    "capstone": "capstone",
+    "unicorn": "unicorn",
+    "keystone-engine": "keystone",
+    "z3-solver": "z3",
+    "pyelftools": "elftools",
+    "lief": "lief",
+    "Pillow": "PIL",
+    "pycryptodome": "Crypto",
+    "gmpy2": "gmpy2",
+    "sympy": "sympy",
+    "oletools": "oletools",
+    "volatility3": "volatility3",
+    "python-magic": "magic",
+}
 
-PYTHON_IMPORTS = [
-    "pwn", "capstone", "unicorn", "keystone", "z3", "elftools", "lief",
-    "PIL", "Crypto", "gmpy2", "sympy", "oletools", "volatility3", "magic",
-]
+PYTHON_COMMAND_PACKAGES = {
+    "ROPgadget": ("ROPgadget", "ropgadget"),
+    "ropper": ("ropper",),
+}
+
+PYTHON_PACKAGES = [*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]
+PYTHON_IMPORTS = list(PYTHON_IMPORT_PACKAGES.values())
 
 RUBY_GEMS = ["one_gadget", "seccomp-tools", "zsteg"]
 
@@ -719,11 +733,15 @@ class Bootstrap:
         if probe.returncode == 0:
             missing_modules = set((probe.stdout or "").splitlines())
             missing = [
-                package for package, module in zip(PYTHON_PACKAGES, PYTHON_IMPORTS)
+                package for package, module in PYTHON_IMPORT_PACKAGES.items()
                 if module in missing_modules
             ]
         else:
-            missing = list(PYTHON_PACKAGES)
+            missing = list(PYTHON_IMPORT_PACKAGES)
+        missing.extend(
+            package for package, commands in PYTHON_COMMAND_PACKAGES.items()
+            if not any(self.command_exists(command) for command in commands)
+        )
         if not missing:
             self.ok("Python tools: already installed")
             return
