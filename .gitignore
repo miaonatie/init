@@ -3,10 +3,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Runtime reports
+# Legacy local reports
 state/
 
-# Local archives / release assets
+# Local archives
 *.zip
 *.tar.gz
 *.tgz
