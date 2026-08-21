@@ -100,25 +100,29 @@ class Bootstrap:
         self.started_at = time.time()
         self.started_monotonic = time.monotonic()
         self.step = 0
-        self.step_total = 9
+        self.step_total = 6
         self.apt_updated = False
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
         self.is_wsl = self.detect_wsl()
+        self.color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
         self._extend_path()
 
+    def colorize(self, code: str, text: str) -> str:
+        return f"\033[{code}m{text}\033[0m" if self.color else text
+
     def info(self, message: str) -> None:
-        print(f"INFO: {message}")
+        print(self.colorize("36", f"INFO: {message}"))
 
     def ok(self, message: str) -> None:
-        print(f"OK: {message}")
+        print(self.colorize("32", f"OK: {message}"))
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
-        print(f"WARN: {message}")
+        print(self.colorize("33", f"WARN: {message}"))
 
     def error(self, message: str) -> None:
-        print(f"ERROR: {message}", file=sys.stderr)
+        print(self.colorize("31", f"ERROR: {message}"), file=sys.stderr)
 
     @staticmethod
     def format_duration(seconds: float) -> str:
@@ -130,7 +134,9 @@ class Bootstrap:
     def section(self, title: str) -> None:
         self.step += 1
         elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
-        print(f"\n[{self.step:02d}/{self.step_total:02d}] {title} | elapsed {elapsed}")
+        stage = self.colorize("34;1", f"[{self.step:02d}/{self.step_total:02d}] {title}")
+        timing = self.colorize("2", f"elapsed {elapsed}")
+        print(f"\n{stage} | {timing}")
 
     @staticmethod
     def command_exists(command: str) -> bool:
@@ -363,13 +369,12 @@ class Bootstrap:
         return ok_all
 
     def install_system_packages(self) -> None:
-        self.section("System and Pwn packages")
+        self.section("System packages")
         i386 = self.enable_i386()
         self.apt_install([*REQUIRED_APT, *i386], "required packages", required=True)
         self.apt_install(OPTIONAL_APT, "optional terminal tools", required=False)
 
     def install_python_tools(self) -> None:
-        self.section("Python Pwn packages")
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
         help_result = self.run(
             [python, "-m", "pip", "install", "--help"],
@@ -397,7 +402,6 @@ class Bootstrap:
             self.ok("Python tools installed into the user site (~/.local)")
 
     def install_ruby_tools(self) -> None:
-        self.section("Ruby Pwn tools")
         if not self.command_exists("gem"):
             self.failures.append("RubyGems is unavailable")
             return
@@ -447,7 +451,6 @@ class Bootstrap:
         return True
 
     def install_helper_repositories(self) -> None:
-        self.section("glibc helper repositories")
         for name, url in HELPER_REPOS.items():
             if not self.clone_or_update(name, url):
                 continue
@@ -524,9 +527,15 @@ class Bootstrap:
                 except OSError:
                     pass
 
-    def install_external_tools(self) -> None:
-        self.section("Pwndbg and AI tools")
+    def install_pwn_tools(self) -> None:
+        self.section("Pwn tools")
+        self.install_python_tools()
+        self.install_ruby_tools()
         self.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
+        self.install_helper_repositories()
+
+    def install_ai_tools(self) -> None:
+        self.section("AI tools")
         self.install_remote_tool("codex", ["codex"])
         self.install_remote_tool("claude", ["claude"])
         self.install_remote_tool("cc-switch", ["cc-switch"])
@@ -639,7 +648,7 @@ class Bootstrap:
         return None
 
     def verify(self) -> bool:
-        self.section("Verification")
+        self.section("Verification and result")
         checks = [
             ("python3", ["python3"]),
             ("git", ["git"]),
@@ -707,7 +716,6 @@ class Bootstrap:
         )
 
     def summary(self) -> int:
-        self.section("Result")
         elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
         if self.skipped:
             print("Skipped:")
@@ -723,14 +731,12 @@ class Bootstrap:
         return 0
 
     def install(self) -> int:
-        print(f"init {VERSION}")
+        print(self.colorize("36;1", f"init {VERSION}"))
         print("Mode: non-interactive")
         self.preflight()
         self.install_system_packages()
-        self.install_python_tools()
-        self.install_ruby_tools()
-        self.install_external_tools()
-        self.install_helper_repositories()
+        self.install_pwn_tools()
+        self.install_ai_tools()
         self.sync_config()
         self.verify()
         self.write_report()

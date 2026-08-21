@@ -102,14 +102,21 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("--break-system-packages", command)
         self.assertNotIn("venv", command)
 
-    def test_progress_output_is_plain_text(self):
+    def test_progress_output_is_plain_text_when_not_tty(self):
         output = io.StringIO()
         with redirect_stdout(output):
             self.bootstrap.section("Example")
         text = output.getvalue()
-        self.assertIn("[01/09] Example", text)
+        self.assertIn("[01/06] Example", text)
         self.assertIn("elapsed 00:00:00", text)
         self.assertNotIn("\033", text)
+
+    def test_color_output_when_enabled(self):
+        self.bootstrap.color = True
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.bootstrap.ok("Example")
+        self.assertIn("\033[32mOK: Example\033[0m", output.getvalue())
 
 
 if __name__ == "__main__":
