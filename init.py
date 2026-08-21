@@ -40,7 +40,7 @@ APT_UPDATE_WARN_PATTERNS = (
 
 REQUIRED_APT = [
     "ca-certificates", "gnupg", "curl", "wget", "git", "rsync", "sudo",
-    "unzip", "zip", "xz-utils", "zstd", "tar", "gzip", "bzip2", "p7zip-full",
+    "unzip", "zip", "xz-utils", "zstd", "tar", "gzip", "bzip2", "7zip",
     "cpio", "rpm2cpio",
     "pkg-config", "file", "vim", "nano", "tmux", "tree",
     "socat", "netcat-openbsd", "openssh-client",
@@ -51,7 +51,7 @@ REQUIRED_APT = [
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
-    "net-tools", "dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
+    "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
     "tcpdump", "nmap", "lsof", "fail2ban", "ufw",
 ]
 
@@ -80,17 +80,9 @@ HELPER_REPOS = {
 
 REMOTE_INSTALLERS = {
     "pwndbg": ("https://install.pwndbg.re", ["-t", "pwndbg-gdb", "-u"]),
-    "codex": ("https://chatgpt.com/codex/install.sh", []),
-    "claude": ("https://claude.ai/install.sh", []),
-    "cc-switch": (
-        "https://github.com/SaladDay/cc-switch-cli/releases/latest/download/install.sh",
-        [],
-    ),
 }
 
-ALLOWED_INSTALLER_HOSTS = {
-    "install.pwndbg.re", "chatgpt.com", "claude.ai", "github.com",
-}
+ALLOWED_INSTALLER_HOSTS = {"install.pwndbg.re"}
 
 
 class Bootstrap:
@@ -99,7 +91,7 @@ class Bootstrap:
         self.skipped: list[str] = []
         self.started_monotonic = time.monotonic()
         self.step = 0
-        self.step_total = 5
+        self.step_total = 4
         self.apt_updated = False
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
@@ -406,7 +398,7 @@ class Bootstrap:
         self.install_command_links()
 
     def install_command_links(self) -> None:
-        for source, target in (("batcat", "bat"), ("fdfind", "fd")):
+        for source, target in (("batcat", "bat"), ("fdfind", "fd"), ("7zz", "7z")):
             executable = shutil.which(source)
             if executable is None:
                 continue
@@ -569,12 +561,6 @@ class Bootstrap:
         self.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
         self.install_helper_repositories()
 
-    def install_ai_tools(self) -> None:
-        self.section("AI tools")
-        self.install_remote_tool("codex", ["codex"])
-        self.install_remote_tool("claude", ["claude"])
-        self.install_remote_tool("cc-switch", ["cc-switch"])
-
     def find_command(self, names: list[str]) -> str | None:
         self._extend_path()
         for name in names:
@@ -597,9 +583,6 @@ class Bootstrap:
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
             ("one_gadget", ["one_gadget"]),
             ("seccomp-tools", ["seccomp-tools"]),
-            ("codex", ["codex"]),
-            ("claude", ["claude"]),
-            ("cc-switch", ["cc-switch"]),
         ]
         ok_all = True
         for label, names in checks:
@@ -636,7 +619,6 @@ class Bootstrap:
         self.preflight()
         self.install_system_packages()
         self.install_pwn_tools()
-        self.install_ai_tools()
         self.section("Verification")
         self.verify()
         return self.summary()
