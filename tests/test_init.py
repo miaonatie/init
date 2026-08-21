@@ -89,15 +89,28 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(MODULE.ALLOWED_INSTALLER_HOSTS, {"install.pwndbg.re"})
 
     def test_extended_toolchain_keeps_direct_system_python(self):
-        packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT)
+        packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT) | set(MODULE.CTF_APT)
         expected = {
             "clang", "llvm", "lld", "ninja-build", "meson", "default-jdk",
             "radare2", "libradare2-dev", "qemu-user", "qemu-system", "hyfetch",
-            "xxd", "hexedit", "zsh", "shellcheck", "bash-completion",
+            "xxd", "hexyl", "zsh", "shellcheck", "bash-completion",
         }
         self.assertTrue(expected <= packages)
         self.assertNotIn("python3-venv", packages)
         self.assertNotIn("pipx", packages)
+
+    def test_ctf_cli_toolset_is_present_without_system_services(self):
+        packages = set(MODULE.REQUIRED_APT) | set(MODULE.CTF_APT)
+        expected = {
+            "steghide", "stegseek", "binwalk", "libimage-exiftool-perl", "pngcheck",
+            "foremost", "sleuthkit", "tshark", "hashcat", "john", "apktool",
+            "nasm", "valgrind", "ffmpeg", "sox", "zbar-tools", "tesseract-ocr",
+        }
+        self.assertTrue(expected <= packages)
+        self.assertTrue({"Pillow", "pycryptodome", "oletools", "volatility3"} <= set(MODULE.PYTHON_PACKAGES))
+        self.assertIn("zsteg", MODULE.RUBY_GEMS)
+        self.assertNotIn("hexedit", packages)
+        self.assertFalse({"fail2ban", "ufw", "dkms"} & packages)
 
     def test_r2ghidra_uses_official_r2pm_installer(self):
         self.bootstrap.r2ghidra_available = mock.Mock(side_effect=[False, True])
