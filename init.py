@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import platform
 import re
@@ -24,7 +23,6 @@ ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
 CONFIG_SOURCE = ROOT / "config"
 CONFIG_TARGET = HOME / ".config" / "init"
-STATE_DIR = HOME / ".local" / "state" / "init"
 TOOLS_DIR = HOME / "tools"
 VERSION_FILE = ROOT / "VERSION"
 VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev"
@@ -45,20 +43,15 @@ APT_UPDATE_WARN_PATTERNS = (
 )
 
 REQUIRED_APT = [
-    "ca-certificates", "curl", "wget", "git", "sudo", "gnupg",
-    "unzip", "zip", "xz-utils", "zstd", "tar", "gzip", "bzip2", "p7zip-full",
-    "make", "pkg-config", "file", "vim", "tmux", "less", "jq", "tree",
-    "ripgrep", "fd-find", "socat", "netcat-openbsd", "openssh-client", "rlwrap",
-    "build-essential", "gcc", "g++", "libssl-dev", "libffi-dev",
+    "ca-certificates", "curl", "wget", "git",
+    "unzip", "zip", "xz-utils", "tar", "gzip", "bzip2", "p7zip-full",
+    "pkg-config", "file", "tmux", "socat", "netcat-openbsd", "openssh-client",
+    "build-essential", "libssl-dev", "libffi-dev",
     "autoconf", "automake", "libtool", "cmake",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
-    "qemu-user", "qemu-user-static", "ruby-full", "bundler", "zsh",
-]
-
-OPTIONAL_APT = [
-    "python-is-python3", "qemu-user-binfmt", "htop", "bat", "fzf", "btop", "duf",
+    "qemu-user", "qemu-user-static", "ruby-full",
 ]
 
 I386_APT = [
@@ -67,7 +60,7 @@ I386_APT = [
 
 PYTHON_PACKAGES = [
     "pwntools", "ROPgadget", "ropper", "capstone", "unicorn", "keystone-engine",
-    "z3-solver", "pyelftools", "lief", "ipython",
+    "z3-solver", "pyelftools", "lief",
 ]
 
 RUBY_GEMS = ["one_gadget", "seccomp-tools"]
@@ -96,11 +89,9 @@ class Bootstrap:
     def __init__(self) -> None:
         self.failures: list[str] = []
         self.skipped: list[str] = []
-        self.warnings: list[str] = []
-        self.started_at = time.time()
         self.started_monotonic = time.monotonic()
         self.step = 0
-        self.step_total = 6
+        self.step_total = 5
         self.apt_updated = False
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
@@ -118,7 +109,6 @@ class Bootstrap:
         print(self.colorize("32", f"OK: {message}"))
 
     def warn(self, message: str) -> None:
-        self.warnings.append(message)
         print(self.colorize("33", f"WARN: {message}"))
 
     def error(self, message: str) -> None:
@@ -372,7 +362,6 @@ class Bootstrap:
         self.section("System packages")
         i386 = self.enable_i386()
         self.apt_install([*REQUIRED_APT, *i386], "required packages", required=True)
-        self.apt_install(OPTIONAL_APT, "optional terminal tools", required=False)
 
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
@@ -591,7 +580,6 @@ class Bootstrap:
         return True
 
     def sync_config(self) -> None:
-        self.section("Configuration")
         sources = {
             "shell.sh": CONFIG_SOURCE / "shell.sh",
             "gdbinit": CONFIG_SOURCE / "gdbinit",
@@ -648,7 +636,6 @@ class Bootstrap:
         return None
 
     def verify(self) -> bool:
-        self.section("Verification and result")
         checks = [
             ("python3", ["python3"]),
             ("git", ["git"]),
@@ -697,24 +684,6 @@ class Bootstrap:
                 self.error(message)
         return ok_all
 
-    def write_report(self) -> None:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        report = {
-            "version": VERSION,
-            "started_at": self.started_at,
-            "finished_at": time.time(),
-            "distro": self.distro,
-            "architecture": self.arch,
-            "wsl": self.is_wsl,
-            "failures": self.failures,
-            "skipped": self.skipped,
-            "warnings": self.warnings,
-        }
-        self.atomic_write(
-            STATE_DIR / "install-report.json",
-            json.dumps(report, indent=2, ensure_ascii=False) + "\n",
-        )
-
     def summary(self) -> int:
         elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
         if self.skipped:
@@ -737,9 +706,9 @@ class Bootstrap:
         self.install_system_packages()
         self.install_pwn_tools()
         self.install_ai_tools()
+        self.section("Configuration and verification")
         self.sync_config()
         self.verify()
-        self.write_report()
         return self.summary()
 
 
@@ -773,7 +742,6 @@ def main(argv: list[str]) -> int:
         return 130
     except Exception as exc:
         bootstrap.failures.append(str(exc))
-        bootstrap.write_report()
         bootstrap.error(str(exc))
         return 1
 
