@@ -1,4 +1,4 @@
-# init v3
+# init v3.1
 
 面向 WSL、Ubuntu、Debian、Kali 的 Pwn/CTF 环境初始化工具。
 
@@ -33,21 +33,29 @@ python3 init.py
 
 ## 安装内容
 
-- 编译调试：GCC/G++、GDB、gdb-multiarch、checksec、patchelf、binutils、strace、ltrace
-- 多架构：i386/multilib、qemu-user
+- 基础终端：curl、wget、git、rsync、vim、nano、tmux、tree
+- 日常工具：bat、fd、ripgrep、fzf、zoxide、duf、gdu、btop、htop、ncdu、jq、yq、hyfetch
+- 编译开发：GCC/G++、make、CMake、Autoconf、Automake、Libtool、DKMS、默认 JDK
+- 调试逆向：GDB、gdb-multiarch、checksec、patchelf、binutils、strace、ltrace
+- 多架构：i386/multilib、qemu-user、qemu-system、binfmt
+- 网络安全：net-tools、dnsutils、ping、traceroute、mtr、iperf3、tcpdump、socat、nmap、lsof、fail2ban、ufw
+- 压缩处理：zip、unzip、7zip、zstd、cpio、rpm2cpio
 - Python：pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、pyelftools、lief
 - Pwn 工具：pwndbg、one_gadget、seccomp-tools、glibc-all-in-one、libc-database
-- 终端工具：tmux
 - AI 工具：Codex CLI、Claude Code、cc-switch
 
-Python 包使用系统 Python 的用户级目录安装：
+Python Pwn 包直接安装到系统 Python，不使用虚拟环境或用户目录：
 
 ```bash
-python3 -m pip install --user --break-system-packages ...
+sudo python3 -m pip install --break-system-packages ...
 ```
 
 支持该参数的 pip 会使用 `--break-system-packages`；Ubuntu 22.04 等旧版 pip
-不认识该参数时会自动使用兼容模式。命令通常安装到 `~/.local/bin`。
+不认识该参数时会自动使用兼容模式。Ruby 工具同样使用系统级安装，安装后可直接执行。
+
+Ubuntu 会自动安装 `software-properties-common` 并启用 `universe` 软件源。
+`batcat` 和 `fdfind` 会分别建立为系统命令 `bat`、`fd`。
+少数发行版没有的日常工具会显示为跳过，不影响核心 Pwn 环境安装。
 
 ## 说明
 
@@ -55,5 +63,6 @@ python3 -m pip install --user --break-system-packages ...
 - 不会执行 `apt full-upgrade` 或 `apt autoremove`。
 - 请直接以普通用户运行；脚本会在需要时调用 `sudo`。
 - i386/multilib 仅在 x86_64/amd64 上启用。
-- Python 包不使用虚拟环境，会进入当前用户的系统 Python 环境；这更方便，但可能覆盖同名用户包。
+- Python 包会修改系统 Python；使用方便，但可能覆盖同名 pip 包。
+- 为避免误删已有依赖，脚本不会自动执行 `apt autoremove`。
 - 不包含配置写入、安装日志、`pwnnew`、payload 模板或交互菜单。
