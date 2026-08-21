@@ -44,15 +44,18 @@ REQUIRED_APT = [
     "cpio", "rpm2cpio",
     "pkg-config", "file", "vim", "nano", "tmux", "tree",
     "socat", "netcat-openbsd", "openssh-client",
-    "build-essential", "libssl-dev", "libffi-dev", "dkms",
-    "autoconf", "automake", "libtool", "cmake", "default-jdk",
+    "build-essential", "clang", "llvm", "lld", "libssl-dev", "libffi-dev", "libc6-dev",
+    "libbz2-dev", "libreadline-dev", "libsqlite3-dev", "liblzma-dev", "libncurses-dev", "dkms",
+    "autoconf", "automake", "libtool", "cmake", "ninja-build", "meson",
+    "gawk", "bison", "flex", "gettext", "patch", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
-    "python-is-python3", "ruby-full",
+    "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
-    "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
+    "elfutils", "xxd", "hexedit", "ltrace", "strace", "checksec",
+    "libseccomp-dev", "seccomp", "libc6-dbg", "radare2", "libradare2-dev",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
     "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
-    "tcpdump", "nmap", "lsof", "fail2ban", "ufw",
+    "tcpdump", "nmap", "lsof", "zsh", "shellcheck", "bash-completion", "fail2ban", "ufw",
 ]
 
 DAILY_APT = [
@@ -70,6 +73,8 @@ PYTHON_PACKAGES = [
     "pwntools", "ROPgadget", "ropper", "capstone", "unicorn", "keystone-engine",
     "z3-solver", "pyelftools", "lief",
 ]
+
+PYTHON_IMPORTS = ["pwn", "capstone", "unicorn", "keystone", "z3", "elftools", "lief"]
 
 RUBY_GEMS = ["one_gadget", "seccomp-tools"]
 
@@ -445,6 +450,40 @@ class Bootstrap:
         if result.returncode != 0:
             self.failures.append("Ruby Pwn tool installation failed")
 
+    def r2ghidra_available(self) -> bool:
+        if not self.command_exists("r2"):
+            return False
+        result = self.run(
+            ["r2", "-q", "-c", "pdg?", "-c", "q", "/bin/true"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        output = ((result.stdout or "") + (result.stderr or "")).lower()
+        return result.returncode == 0 and (
+            "native ghidra decompiler" in output or "r2ghidra" in output
+        )
+
+    def install_r2ghidra(self) -> None:
+        if self.r2ghidra_available():
+            self.ok("r2ghidra: already installed")
+            return
+        if not self.command_exists("r2pm"):
+            self.failures.append("r2ghidra installation failed: r2pm is unavailable")
+            return
+        for command in (["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]):
+            result = self.run(
+                command,
+                check=False,
+                network=True,
+                timeout=1800,
+            )
+            if result.returncode != 0:
+                self.failures.append("r2ghidra installation failed")
+                return
+        if not self.r2ghidra_available():
+            self.failures.append("r2ghidra installation failed: plugin was not detected")
+
     def clone_or_update(self, name: str, url: str) -> bool:
         destination = TOOLS_DIR / name
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -558,6 +597,7 @@ class Bootstrap:
         self.section("Pwn tools")
         self.install_python_tools()
         self.install_ruby_tools()
+        self.install_r2ghidra()
         self.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
         self.install_helper_repositories()
 
@@ -575,9 +615,21 @@ class Bootstrap:
             ("git", ["git"]),
             ("gcc", ["gcc"]),
             ("g++", ["g++"]),
+            ("clang", ["clang"]),
+            ("cmake", ["cmake"]),
+            ("java", ["java"]),
+            ("javac", ["javac"]),
             ("gdb", ["gdb"]),
+            ("gdb-multiarch", ["gdb-multiarch"]),
             ("checksec", ["checksec"]),
             ("patchelf", ["patchelf"]),
+            ("radare2", ["r2"]),
+            ("qemu-user", ["qemu-x86_64"]),
+            ("qemu-system", ["qemu-system-x86_64"]),
+            ("bat", ["bat"]),
+            ("fd", ["fd"]),
+            ("7z", ["7z"]),
+            ("hyfetch", ["hyfetch"]),
             ("ROPgadget", ["ROPgadget", "ropgadget"]),
             ("ropper", ["ropper"]),
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
@@ -595,6 +647,30 @@ class Bootstrap:
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
+
+        python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        imports = self.run(
+            [python, "-c", "; ".join(f"import {module}" for module in PYTHON_IMPORTS)],
+            check=False,
+            capture=True,
+        )
+        if imports.returncode == 0:
+            self.ok("Python Pwn libraries")
+        else:
+            ok_all = False
+            message = "verification failed: Python Pwn library import failed"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.r2ghidra_available():
+            self.ok("r2ghidra plugin")
+        else:
+            ok_all = False
+            message = "verification failed: r2ghidra plugin not found"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
 
         return ok_all
 
