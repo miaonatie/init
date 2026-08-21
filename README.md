@@ -1,6 +1,6 @@
-# init v3.1
+# init v3.2
 
-面向 WSL、Ubuntu、Debian、Kali 的 Pwn/CTF 环境初始化工具。
+面向 Ubuntu 24.04+、对应 WSL 和最新 Kali 的个人 Pwn/CTF 环境初始化工具。
 
 ## 使用
 
@@ -50,19 +50,19 @@ Python Pwn 包直接安装到系统 Python，不使用虚拟环境或用户目�
 sudo python3 -m pip install --break-system-packages ...
 ```
 
-支持该参数的 pip 会使用 `--break-system-packages`；Ubuntu 22.04 等旧版 pip
-不认识该参数时会自动使用兼容模式。Ruby 工具同样使用系统级安装，安装后可直接执行。
+Ubuntu 24.04 和当前 Kali 的 pip 会固定使用 `--break-system-packages`。
+Ruby 工具同样使用系统级安装，安装后可直接执行。
 
 Ubuntu 会自动安装 `software-properties-common` 并启用 `universe` 软件源。
 `batcat` 和 `fdfind` 会分别建立为系统命令 `bat`、`fd`。
-少数发行版没有的日常工具会显示为跳过，不影响核心 Pwn 环境安装。
+清单内软件全部作为必装项处理；`gdu` 仅在提供该包的 Kali 上安装。
 
 ## 说明
 
-- 仅支持使用 APT 的 Ubuntu、Debian、Kali 和 WSL 环境。
+- 仅支持 Ubuntu 24.04 及以上版本、对应 WSL，以及当前 Kali。
 - 不会执行 `apt full-upgrade` 或 `apt autoremove`。
 - 请直接以普通用户运行；脚本会在需要时调用 `sudo`。
 - i386/multilib 仅在 x86_64/amd64 上启用。
-- Python 包会修改系统 Python；使用方便，但可能覆盖同名 pip 包。
+- Python 包直接修改系统 Python；不创建或使用虚拟环境。
 - 为避免误删已有依赖，脚本不会自动执行 `apt autoremove`。
 - 不包含配置写入、安装日志、`pwnnew`、payload 模板或交互菜单。
