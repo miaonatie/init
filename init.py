@@ -731,17 +731,19 @@ class Bootstrap:
 
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        probe_code = (
+            "import importlib\n"
+            f"modules = {PYTHON_IMPORTS!r}\n"
+            "failed = []\n"
+            "for module in modules:\n"
+            "    try:\n"
+            "        importlib.import_module(module)\n"
+            "    except Exception:\n"
+            "        failed.append(module)\n"
+            "print('\\n'.join(failed))\n"
+        )
         probe = self.run(
-            [
-                python,
-                "-c",
-                "import importlib; modules="
-                + repr(PYTHON_IMPORTS)
-                + "; failed=[]\nfor module in modules:\n"
-                + " try: importlib.import_module(module)\n"
-                + " except Exception: failed.append(module)\n"
-                + "print('\\n'.join(failed))",
-            ],
+            [python, "-c", probe_code],
             check=False,
             capture=True,
         )
