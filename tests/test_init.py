@@ -88,6 +88,28 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(set(MODULE.REMOTE_INSTALLERS), {"pwndbg"})
         self.assertEqual(MODULE.ALLOWED_INSTALLER_HOSTS, {"install.pwndbg.re"})
 
+    def test_extended_toolchain_keeps_direct_system_python(self):
+        packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT)
+        expected = {
+            "clang", "llvm", "lld", "ninja-build", "meson", "default-jdk",
+            "radare2", "libradare2-dev", "qemu-user", "qemu-system", "hyfetch",
+            "xxd", "hexedit", "zsh", "shellcheck", "bash-completion",
+        }
+        self.assertTrue(expected <= packages)
+        self.assertNotIn("python3-venv", packages)
+        self.assertNotIn("pipx", packages)
+
+    def test_r2ghidra_uses_official_r2pm_installer(self):
+        self.bootstrap.r2ghidra_available = mock.Mock(side_effect=[False, True])
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["r2pm"], 0)
+        )
+        self.bootstrap.install_r2ghidra()
+        commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+        self.assertEqual(commands, [["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]])
+        self.assertEqual(self.bootstrap.failures, [])
+
 
 if __name__ == "__main__":
     unittest.main()
