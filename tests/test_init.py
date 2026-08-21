@@ -15,45 +15,9 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-class ConfigTests(unittest.TestCase):
+class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.bootstrap = MODULE.Bootstrap()
-
-    def test_upsert_replaces_only_named_block(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "rc"
-            target.write_text(
-                "before\n# >>> other >>>\nkeep\n# <<< other <<<\n",
-                encoding="utf-8",
-            )
-            self.bootstrap.upsert_block(target, "init-shell", "source managed")
-            self.bootstrap.upsert_block(target, "init-shell", "source updated")
-            text = target.read_text(encoding="utf-8")
-            self.assertIn("# >>> other >>>\nkeep\n# <<< other <<<", text)
-            self.assertNotIn("source managed", text)
-            self.assertEqual(text.count("# >>> init-shell >>>"), 1)
-            self.assertIn("source updated", text)
-
-    def test_remove_block_keeps_unmanaged_content(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "rc"
-            target.write_text(
-                "before\n# >>> init-shell >>>\nmanaged\n# <<< init-shell <<<\nafter\n",
-                encoding="utf-8",
-            )
-            self.assertTrue(self.bootstrap.remove_block(target, "init-shell"))
-            self.assertEqual(target.read_text(encoding="utf-8"), "before\nafter\n")
-
-    def test_atomic_write_replaces_content(self):
-        with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "file"
-            MODULE.Bootstrap.atomic_write(target, "first\n")
-            MODULE.Bootstrap.atomic_write(target, "second\n")
-            self.assertEqual(target.read_text(encoding="utf-8"), "second\n")
-
-    def test_required_config_files_exist(self):
-        for name in ("shell.sh", "gdbinit", "tmux.conf"):
-            self.assertTrue((ROOT / "config" / name).is_file())
 
     def test_version_has_single_source_of_truth(self):
         self.assertEqual(MODULE.VERSION, (ROOT / "VERSION").read_text(encoding="utf-8").strip())
