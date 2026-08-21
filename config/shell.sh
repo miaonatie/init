@@ -18,21 +18,4 @@ unset init_gem_bin
 
 export PATH
 
-if command -v batcat >/dev/null 2>&1; then
-  alias bat='batcat'
-fi
-if command -v fdfind >/dev/null 2>&1; then
-  alias fd='fdfind'
-fi
-
-alias ll='ls -alF'
-alias la='ls -A'
-alias l='ls -CF'
-alias grep='grep --color=auto'
-alias cls='clear'
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-alias ports='ss -tulpen'
-
 unset -f path_prepend
