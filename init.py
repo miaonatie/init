@@ -53,7 +53,7 @@ REQUIRED_APT = [
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
-    "elfutils", "xxd", "hexyl", "ltrace", "strace", "checksec",
+    "elfutils", "xxd", "ltrace", "strace", "checksec",
     "libseccomp-dev", "seccomp", "libc6-dbg", "radare2", "libradare2-dev",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
     "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
@@ -364,6 +364,14 @@ class Bootstrap:
         self._package_cache[package] = installed
         return installed
 
+    def package_available(self, package: str) -> bool:
+        result = self.run(
+            ["apt-cache", "--no-all-versions", "show", package],
+            capture=True,
+            check=False,
+        )
+        return result.returncode == 0 and bool((result.stdout or "").strip())
+
     def planned_apt_packages(self) -> list[str]:
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         i386 = I386_APT if self.arch in {"x86_64", "amd64"} else []
@@ -430,6 +438,15 @@ class Bootstrap:
             message = f"{label}: skipped because APT update failed"
             (self.failures if required else self.skipped).append(message)
             return False
+        unavailable = [package for package in missing if not self.package_available(package)]
+        for package in unavailable:
+            message = f"APT package unavailable: {package}"
+            (self.failures if required else self.skipped).append(message)
+        if unavailable:
+            missing = [package for package in missing if package not in unavailable]
+        if not missing:
+            return not unavailable
+        available_ok = not unavailable
         self.info(f"installing {label}: {len(missing)} packages")
         result = self.run(
             [
@@ -438,15 +455,14 @@ class Bootstrap:
             ],
             sudo=True,
             check=False,
-            network=True,
             env=self.apt_env(),
         )
         self._package_cache.clear()
         if result.returncode == 0:
-            return True
+            return available_ok
 
         self.warn(f"batch install failed for {label}; retrying remaining packages individually")
-        ok_all = True
+        ok_all = available_ok
         for package in [p for p in missing if not self.package_installed(p)]:
             result = self.run(
                 [
@@ -455,7 +471,6 @@ class Bootstrap:
                 ],
                 sudo=True,
                 check=False,
-                network=True,
                 env=self.apt_env(),
             )
             self._package_cache[package] = result.returncode == 0
@@ -644,7 +659,6 @@ class Bootstrap:
                 ["apt-get", *self.apt_options(), "remove", "-y", *conflicts],
                 sudo=True,
                 check=False,
-                network=True,
                 env=self.apt_env(),
             )
             self._package_cache.clear()
@@ -959,6 +973,7 @@ class Bootstrap:
             ("gdb-multiarch", ["gdb-multiarch"]),
             ("checksec", ["checksec"]),
             ("patchelf", ["patchelf"]),
+            ("xxd", ["xxd"]),
             ("radare2", ["r2"]),
             ("qemu-user", ["qemu-x86_64"]),
             ("qemu-system", ["qemu-system-x86_64"]),
