@@ -107,7 +107,7 @@ class ConfigTests(unittest.TestCase):
         with redirect_stdout(output):
             self.bootstrap.section("Example")
         text = output.getvalue()
-        self.assertIn("[01/06] Example", text)
+        self.assertIn("[01/05] Example", text)
         self.assertIn("elapsed 00:00:00", text)
         self.assertNotIn("\033", text)
 
