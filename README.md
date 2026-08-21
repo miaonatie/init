@@ -14,15 +14,14 @@ python3 init.py
 并显示当前步骤和累计耗时；输出重定向到文件时会自动关闭颜色。
 它会自动完成安装、补装、配置同步和结果检查，重复运行是安全的。
 
-安装流程合并为 6 个阶段：
+安装流程只有 5 个阶段：
 
 ```text
 1. 系统检查
 2. 系统与基础软件包
 3. Pwn 工具（Python、Ruby、pwndbg、glibc 工具仓库）
 4. AI 工具（Codex、Claude、cc-switch）
-5. shell、GDB、tmux 配置
-6. 验证与最终结果
+5. shell、GDB、tmux 配置与最终验证
 ```
 
 更新后重新运行即可：
@@ -44,9 +43,9 @@ python3 init.py --clean
 
 - 编译调试：GCC/G++、GDB、gdb-multiarch、checksec、patchelf、binutils、strace、ltrace
 - 多架构：i386/multilib、qemu-user
-- Python：pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、pyelftools、lief、IPython
+- Python：pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、pyelftools、lief
 - Pwn 工具：pwndbg、one_gadget、seccomp-tools、glibc-all-in-one、libc-database
-- 终端工具：zsh、tmux、ripgrep、fzf、bat、btop、duf
+- 终端工具：tmux
 - AI 工具：Codex CLI、Claude Code、cc-switch
 
 Python 包使用系统 Python 的用户级目录安装：
@@ -62,12 +61,6 @@ python3 -m pip install --user --break-system-packages ...
 
 ```text
 ~/.config/init
-```
-
-安装报告写入：
-
-```text
-~/.local/state/init/install-report.json
 ```
 
 ## 修改配置
