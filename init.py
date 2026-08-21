@@ -45,17 +45,17 @@ REQUIRED_APT = [
     "pkg-config", "file", "vim", "nano", "tmux", "tree",
     "socat", "netcat-openbsd", "openssh-client",
     "build-essential", "clang", "llvm", "lld", "libssl-dev", "libffi-dev", "libc6-dev",
-    "libbz2-dev", "libreadline-dev", "libsqlite3-dev", "liblzma-dev", "libncurses-dev", "dkms",
+    "libbz2-dev", "libreadline-dev", "libsqlite3-dev", "liblzma-dev", "libncurses-dev",
     "autoconf", "automake", "libtool", "cmake", "ninja-build", "meson",
     "gawk", "bison", "flex", "gettext", "patch", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
-    "elfutils", "xxd", "hexedit", "ltrace", "strace", "checksec",
+    "elfutils", "xxd", "hexyl", "ltrace", "strace", "checksec",
     "libseccomp-dev", "seccomp", "libc6-dbg", "radare2", "libradare2-dev",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
     "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
-    "tcpdump", "nmap", "lsof", "zsh", "shellcheck", "bash-completion", "fail2ban", "ufw",
+    "tcpdump", "nmap", "lsof", "zsh", "shellcheck", "bash-completion",
 ]
 
 DAILY_APT = [
@@ -65,18 +65,31 @@ DAILY_APT = [
 
 KALI_APT = ["gdu"]
 
+CTF_APT = [
+    "nasm", "yasm", "valgrind", "apktool",
+    "steghide", "stegseek", "binwalk", "libimage-exiftool-perl", "pngcheck",
+    "foremost", "sleuthkit", "testdisk", "squashfs-tools", "mtd-utils", "cabextract",
+    "imagemagick", "ffmpeg", "sox", "libsox-fmt-all", "mediainfo",
+    "zbar-tools", "qrencode", "tesseract-ocr", "poppler-utils", "qpdf",
+    "hashcat", "john", "tshark", "sqlite3", "bc", "xmlstarlet", "openssl",
+]
+
 I386_APT = [
     "gcc-multilib", "g++-multilib", "libc6-i386", "libc6-dev-i386", "libc6-dbg:i386",
 ]
 
 PYTHON_PACKAGES = [
     "pwntools", "ROPgadget", "ropper", "capstone", "unicorn", "keystone-engine",
-    "z3-solver", "pyelftools", "lief",
+    "z3-solver", "pyelftools", "lief", "Pillow", "pycryptodome", "gmpy2", "sympy",
+    "oletools", "volatility3", "python-magic",
 ]
 
-PYTHON_IMPORTS = ["pwn", "capstone", "unicorn", "keystone", "z3", "elftools", "lief"]
+PYTHON_IMPORTS = [
+    "pwn", "capstone", "unicorn", "keystone", "z3", "elftools", "lief",
+    "PIL", "Crypto", "gmpy2", "sympy", "oletools", "volatility3", "magic",
+]
 
-RUBY_GEMS = ["one_gadget", "seccomp-tools"]
+RUBY_GEMS = ["one_gadget", "seccomp-tools", "zsteg"]
 
 HELPER_REPOS = {
     "glibc-all-in-one": "https://github.com/matrix1001/glibc-all-in-one.git",
@@ -396,7 +409,7 @@ class Bootstrap:
         i386 = self.enable_i386()
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         self.apt_install(
-            [*REQUIRED_APT, *DAILY_APT, *distro_packages, *i386],
+            [*REQUIRED_APT, *DAILY_APT, *CTF_APT, *distro_packages, *i386],
             "all packages",
             required=True,
         )
@@ -630,6 +643,18 @@ class Bootstrap:
             ("fd", ["fd"]),
             ("7z", ["7z"]),
             ("hyfetch", ["hyfetch"]),
+            ("nasm", ["nasm"]),
+            ("valgrind", ["valgrind"]),
+            ("apktool", ["apktool"]),
+            ("steghide", ["steghide"]),
+            ("stegseek", ["stegseek"]),
+            ("binwalk", ["binwalk"]),
+            ("zsteg", ["zsteg"]),
+            ("exiftool", ["exiftool"]),
+            ("foremost", ["foremost"]),
+            ("tshark", ["tshark"]),
+            ("hashcat", ["hashcat"]),
+            ("john", ["john"]),
             ("ROPgadget", ["ROPgadget", "ropgadget"]),
             ("ropper", ["ropper"]),
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
