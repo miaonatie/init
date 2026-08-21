@@ -73,7 +73,7 @@ class InstallerTests(unittest.TestCase):
         with redirect_stdout(output):
             self.bootstrap.section("Example")
         text = output.getvalue()
-        self.assertIn("[01/05] Example", text)
+        self.assertIn("[01/04] Example", text)
         self.assertIn("elapsed 00:00:00", text)
         self.assertNotIn("\033", text)
 
@@ -83,6 +83,10 @@ class InstallerTests(unittest.TestCase):
         with redirect_stdout(output):
             self.bootstrap.ok("Example")
         self.assertIn("\033[32mOK: Example\033[0m", output.getvalue())
+
+    def test_only_pwndbg_remote_installer_remains(self):
+        self.assertEqual(set(MODULE.REMOTE_INSTALLERS), {"pwndbg"})
+        self.assertEqual(MODULE.ALLOWED_INSTALLER_HOSTS, {"install.pwndbg.re"})
 
 
 if __name__ == "__main__":
