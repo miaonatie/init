@@ -26,6 +26,12 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.bootstrap.download_installer("test", "http://example.com/install.sh")
 
+    def test_supports_only_modern_ubuntu_and_kali(self):
+        self.assertTrue(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": "24.04"}))
+        self.assertTrue(MODULE.Bootstrap.supported_distro({"id": "kali", "version": "2026.2"}))
+        self.assertFalse(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": "22.04"}))
+        self.assertFalse(MODULE.Bootstrap.supported_distro({"id": "debian", "version": "13"}))
+
     @mock.patch.object(MODULE.time, "sleep")
     def test_apt_update_rejects_partial_index(self, _sleep):
         result = subprocess.CompletedProcess(
@@ -52,16 +58,10 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("repository update failed: sample", self.bootstrap.failures)
 
     def test_python_install_uses_break_system_packages_globally(self):
-        help_result = subprocess.CompletedProcess(
-            ["python3", "-m", "pip", "install", "--help"],
-            0,
-            stdout="options: --break-system-packages",
-            stderr="",
-        )
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
-        self.bootstrap.run = mock.Mock(side_effect=[help_result, install_result])
+        self.bootstrap.run = mock.Mock(return_value=install_result)
         self.bootstrap.install_python_tools()
-        install_call = self.bootstrap.run.call_args_list[1]
+        install_call = self.bootstrap.run.call_args
         command = install_call.args[0]
         self.assertNotIn("--user", command)
         self.assertIn("--break-system-packages", command)

@@ -26,7 +26,6 @@ VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exist
 
 NETWORK_ATTEMPTS = 3
 NETWORK_DELAYS = (2, 5)
-SUPPORTED_DISTROS = {"ubuntu", "debian", "kali"}
 APT_UPDATE_WARN_PATTERNS = (
     "Failed to fetch",
     "Some index files failed",
@@ -48,8 +47,7 @@ REQUIRED_APT = [
     "build-essential", "libssl-dev", "libffi-dev", "dkms",
     "autoconf", "automake", "libtool", "cmake", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
-    "python3-venv", "python-is-python3",
-    "ruby-full", "bundler",
+    "python-is-python3", "ruby-full",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
@@ -57,10 +55,12 @@ REQUIRED_APT = [
     "tcpdump", "nmap", "lsof", "fail2ban", "ufw",
 ]
 
-OPTIONAL_APT = [
-    "bat", "fd-find", "ripgrep", "fzf", "zoxide", "duf", "gdu", "btop",
+DAILY_APT = [
+    "bat", "fd-find", "ripgrep", "fzf", "zoxide", "duf", "btop",
     "htop", "ncdu", "jq", "yq", "hyfetch",
 ]
+
+KALI_APT = ["gdu"]
 
 I386_APT = [
     "gcc-multilib", "g++-multilib", "libc6-i386", "libc6-dev-i386", "libc6-dbg:i386",
@@ -167,6 +167,18 @@ class Bootstrap:
             value = ""
         return "microsoft" in value or "wsl" in value or bool(os.environ.get("WSL_DISTRO_NAME"))
 
+    @staticmethod
+    def supported_distro(distro: dict[str, str]) -> bool:
+        if distro["id"] == "kali":
+            return True
+        if distro["id"] != "ubuntu":
+            return False
+        try:
+            major, minor = (int(part) for part in distro["version"].split(".")[:2])
+        except (TypeError, ValueError):
+            return False
+        return (major, minor) >= (24, 4)
+
     def _extend_path(self) -> None:
         candidates = [
             HOME / ".local" / "bin",
@@ -200,7 +212,8 @@ class Bootstrap:
         attempts = NETWORK_ATTEMPTS if network else 1
         result: subprocess.CompletedProcess[str] | None = None
         for attempt in range(1, attempts + 1):
-            print("  $", shlex.join(final))
+            if not capture:
+                print("  $", shlex.join(final))
             try:
                 result = subprocess.run(
                     final,
@@ -254,10 +267,10 @@ class Bootstrap:
             raise RuntimeError("this installer supports Linux and WSL only")
         if not self.command_exists("apt-get") or not self.command_exists("dpkg-query"):
             raise RuntimeError("apt-get and dpkg-query are required")
-        if self.distro["id"] not in SUPPORTED_DISTROS:
+        if not self.supported_distro(self.distro):
             raise RuntimeError(
                 f"unsupported distribution: {self.distro['name']} "
-                f"(supported: Ubuntu, Debian, Kali)"
+                f"(supported: Ubuntu 24.04+ and current Kali)"
             )
         self.require_sudo()
         free = shutil.disk_usage(HOME).free
@@ -384,8 +397,12 @@ class Bootstrap:
                     self.failures.append("failed to enable the Ubuntu universe repository")
                 self.apt_updated = False
         i386 = self.enable_i386()
-        self.apt_install([*REQUIRED_APT, *i386], "required packages", required=True)
-        self.apt_install(OPTIONAL_APT, "daily-use tools", required=False)
+        distro_packages = KALI_APT if self.distro["id"] == "kali" else []
+        self.apt_install(
+            [*REQUIRED_APT, *DAILY_APT, *distro_packages, *i386],
+            "all packages",
+            required=True,
+        )
         self.install_command_links()
 
     def install_command_links(self) -> None:
@@ -403,21 +420,9 @@ class Bootstrap:
 
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
-        help_result = self.run(
-            [python, "-m", "pip", "install", "--help"],
-            capture=True,
-            check=False,
-        )
-        break_flag = (
-            ["--break-system-packages"]
-            if "--break-system-packages" in (help_result.stdout or "")
-            else []
-        )
-        if not break_flag:
-            self.warn("this pip version does not support --break-system-packages; continuing in compatibility mode")
         result = self.run(
             [
-                python, "-m", "pip", "install", *break_flag,
+                python, "-m", "pip", "install", "--break-system-packages",
                 "--disable-pip-version-check", *PYTHON_PACKAGES,
             ],
             sudo=True,
