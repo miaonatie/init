@@ -24,9 +24,7 @@ ROOT = Path(__file__).resolve().parent
 HOME = Path.home()
 CONFIG_SOURCE = ROOT / "config"
 CONFIG_TARGET = HOME / ".config" / "init"
-DATA_DIR = HOME / ".local" / "share" / "init"
 STATE_DIR = HOME / ".local" / "state" / "init"
-VENV_DIR = DATA_DIR / "venv"
 TOOLS_DIR = HOME / "tools"
 VERSION_FILE = ROOT / "VERSION"
 VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev"
@@ -53,7 +51,7 @@ REQUIRED_APT = [
     "ripgrep", "fd-find", "socat", "netcat-openbsd", "openssh-client", "rlwrap",
     "build-essential", "gcc", "g++", "libssl-dev", "libffi-dev",
     "autoconf", "automake", "libtool", "cmake",
-    "python3", "python3-dev", "python3-pip", "python3-venv", "python3-setuptools", "python3-wheel",
+    "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
     "qemu-user", "qemu-user-static", "ruby-full", "bundler", "zsh",
@@ -160,7 +158,6 @@ class Bootstrap:
     def _extend_path(self) -> None:
         candidates = [
             HOME / ".local" / "bin",
-            VENV_DIR / "bin",
             HOME / ".cargo" / "bin",
             *sorted((HOME / ".local" / "share" / "gem" / "ruby").glob("*/bin")),
         ]
@@ -364,36 +361,32 @@ class Bootstrap:
         self.apt_install(OPTIONAL_APT, "optional terminal tools", required=False)
 
     def install_python_tools(self) -> None:
-        self.section("Python Pwn environment")
-        if not VENV_DIR.exists():
-            result = self.run(
-                ["python3", "-m", "venv", str(VENV_DIR)],
-                check=False,
-            )
-            if result.returncode != 0:
-                self.failures.append("failed to create Python virtual environment")
-                return
-        python = VENV_DIR / "bin" / "python"
-        if not python.exists():
-            self.failures.append(f"virtual environment is incomplete: {VENV_DIR}")
-            return
-        upgrade = self.run(
-            [str(python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
+        self.section("Python Pwn packages")
+        python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        help_result = self.run(
+            [python, "-m", "pip", "install", "--help"],
+            capture=True,
             check=False,
-            network=True,
         )
-        if upgrade.returncode != 0:
-            self.failures.append("failed to prepare Python virtual environment")
-            return
+        break_flag = (
+            ["--break-system-packages"]
+            if "--break-system-packages" in (help_result.stdout or "")
+            else []
+        )
+        if not break_flag:
+            self.warn("this pip version does not support --break-system-packages; continuing in compatibility mode")
         result = self.run(
-            [str(python), "-m", "pip", "install", "--upgrade", *PYTHON_PACKAGES],
+            [
+                python, "-m", "pip", "install", "--user", *break_flag,
+                "--disable-pip-version-check", *PYTHON_PACKAGES,
+            ],
             check=False,
             network=True,
         )
         if result.returncode != 0:
             self.failures.append("Python Pwn package installation failed")
         else:
-            self.ok(f"Python tools: {VENV_DIR}")
+            self.ok("Python tools installed into the user site (~/.local)")
 
     def install_ruby_tools(self) -> None:
         self.section("Ruby Pwn tools")

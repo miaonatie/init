@@ -9,7 +9,6 @@ path_prepend() {
 }
 
 path_prepend "$HOME/.local/bin"
-path_prepend "$HOME/.local/share/init/venv/bin"
 
 # Ruby --user-install binaries.
 for init_gem_bin in "$HOME"/.local/share/gem/ruby/*/bin; do
