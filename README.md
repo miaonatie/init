@@ -31,16 +31,19 @@ python3 init.py --clean
 
 - 编译调试：GCC/G++、GDB、gdb-multiarch、checksec、patchelf、binutils、strace、ltrace
 - 多架构：i386/multilib、qemu-user
-- Python：独立虚拟环境中的 pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、lief
+- Python：pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、pyelftools、lief、IPython
 - Pwn 工具：pwndbg、one_gadget、seccomp-tools、glibc-all-in-one、libc-database
 - 终端工具：zsh、tmux、ripgrep、fzf、bat、btop、duf
 - AI 工具：Codex CLI、Claude Code、cc-switch
 
-Python 工具安装在：
+Python 包使用系统 Python 的用户级目录安装：
 
-```text
-~/.local/share/init/venv
+```bash
+python3 -m pip install --user --break-system-packages ...
 ```
+
+支持该参数的 pip 会使用 `--break-system-packages`；Ubuntu 22.04 等旧版 pip
+不认识该参数时会自动使用兼容模式。命令通常安装到 `~/.local/bin`。
 
 项目配置同步到：
 
@@ -76,4 +79,7 @@ python3 init.py
 - 不会执行 `apt full-upgrade` 或 `apt autoremove`。
 - 请直接以普通用户运行；脚本会在需要时调用 `sudo`。
 - i386/multilib 仅在 x86_64/amd64 上启用。
+- Python 包不使用虚拟环境，会进入当前用户的系统 Python 环境；这更方便，但可能覆盖同名用户包。
 - 不再包含 `pwnnew`、payload 模板和交互安装菜单。
+
+从 `v2.0.0` 升级时，旧目录 `~/.local/share/init/venv` 不会自动删除；确认不再使用后可手动清理。
