@@ -1,303 +1,79 @@
-# init v1.0.5
+# init v2
 
-Portable CTF pwn environment initializer for fresh WSL / Kali / Debian / Ubuntu systems.
+面向 WSL、Ubuntu、Debian、Kali 的 Pwn/CTF 环境初始化工具。
 
-Recommended install method:
+## 使用
 
 ```bash
 git clone https://github.com/miaonatie/init.git
 cd init
-python3 init-install.py
+python3 init.py
 ```
 
-`init` has two scripts:
+不需要选择参数。脚本会自动完成安装、补装、配置同步和结果检查，重复运行是安全的。
+
+更新后重新运行即可：
+
+```bash
+git pull
+python3 init.py
+```
+
+删除配置钩子：
+
+```bash
+python3 init.py --clean
+```
+
+`--clean` 只删除本项目管理的 shell、GDB、tmux 配置，不卸载软件。
+
+## 安装内容
+
+- 编译调试：GCC/G++、GDB、gdb-multiarch、checksec、patchelf、binutils、strace、ltrace
+- 多架构：i386/multilib、qemu-user
+- Python：独立虚拟环境中的 pwntools、ROPgadget、ropper、capstone、unicorn、keystone、z3、lief
+- Pwn 工具：pwndbg、one_gadget、seccomp-tools、glibc-all-in-one、libc-database
+- 终端工具：zsh、tmux、ripgrep、fzf、bat、btop、duf
+- AI 工具：Codex CLI、Claude Code、cc-switch
+
+Python 工具安装在：
 
 ```text
-init-install.py   install tools
-init-config.py    apply config from ./config
+~/.local/share/init/venv
 ```
 
-Edit files under `config/` directly. The package directory is the config source.
-
----
-
-## Quick start
-
-Install the default environment:
-
-```bash
-python3 init-install.py
-```
-
-Interactive install:
-
-```bash
-python3 init-install.py --menu
-```
-
-Install tools only:
-
-```bash
-python3 init-install.py --no-config
-```
-
-Apply config only:
-
-```bash
-python3 init-config.py
-```
-
-Check status:
-
-```bash
-python3 init-install.py --test
-python3 init-config.py --test
-```
-
-Clean config hooks:
-
-```bash
-python3 init-config.py --clean
-```
-
-Show editable files:
-
-```bash
-python3 init-config.py --paths
-```
-
----
-
-## Layout
+项目配置同步到：
 
 ```text
-init/
-├── VERSION
-├── README.md
-├── .gitignore
-├── .gitattributes
-├── init-install.py
-├── init-config.py
-└── config/
-    ├── shell.sh
-    ├── pwnnew.sh
-    ├── gdbinit
-    ├── tmux.conf
-    └── templates/
-        ├── payload.py
-        └── AGENTS.md
+~/.config/init
 ```
 
----
-
-## Default tools
+安装报告写入：
 
 ```text
-System:  gcc/g++, gdb, checksec, patchelf, binutils, seccomp, qemu, i386
-Python:  pwntools, ROPgadget, ropper, capstone, unicorn, keystone, z3, lief
-Ruby:    one_gadget, seccomp-tools
-CLI:     zsh, oh-my-zsh, fzf, bat, eza, btop, duf, trashy
-Repos:   pwndbg, glibc-all-in-one, libc-database
-AI:      Codex CLI, Claude Code, cc-switch
+~/.local/state/init/install-report.json
 ```
 
-Installed tools are skipped when possible. The installer is safe to rerun.
+## 修改配置
 
----
-
-## Config files
-
-### `config/shell.sh`
-
-Loaded by bash/zsh.
-
-Use it for:
+直接编辑：
 
 ```text
-PATH
-zsh / oh-my-zsh settings
-aliases
-trashy aliases
+config/shell.sh
+config/gdbinit
+config/tmux.conf
 ```
 
-Reload after editing:
+然后重新运行：
 
 ```bash
-source ~/.bashrc
-# or
-source ~/.zshrc
+python3 init.py
 ```
 
-### `config/pwnnew.sh`
+## 说明
 
-Defines `pwnnew`.
-
-```bash
-pwnnew babyrop
-pwnnew babyrop ./chall ./libc.so.6 ./ld-linux-x86-64.so.2
-pwnnew ./challenge.zip
-pwnnew --no-extract ./challenge.zip
-pwnnew --help
-```
-
-A new workspace contains:
-
-```text
-payload.py
-AGENTS.md
-```
-
-### `config/templates/payload.py`
-
-Default pwntools template copied by `pwnnew`.
-
-```bash
-python3 payload.py
-python3 payload.py GDB
-python3 payload.py REMOTE HOST=example.com PORT=31337
-python3 payload.py BIN=./chall LIBC=./libc.so.6 LD=./ld-linux-x86-64.so.2
-```
-
-### `config/templates/AGENTS.md`
-
-Workspace note for Codex / Claude Code.
-
-### `config/gdbinit`
-
-Loaded by `~/.gdbinit`.
-
-### `config/tmux.conf`
-
-Loaded by `~/.tmux.conf`.
-
-Reload tmux manually if needed:
-
-```bash
-tmux source-file ~/.tmux.conf
-```
-
----
-
-## Move the package
-
-The config hook stores the package path. After moving the directory, run:
-
-```bash
-python3 init-config.py
-```
-
----
-
-## Clean
-
-```bash
-python3 init-config.py --clean
-```
-
-Removes marked `init-*` blocks from:
-
-```text
-~/.bashrc
-~/.zshrc
-~/.gdbinit
-~/.tmux.conf
-```
-
-It does not uninstall software.
-
----
-
-## Line endings
-
-This package keeps text files as LF with `.gitattributes`:
-
-```text
-* text=auto eol=lf
-```
-
-If Windows editing adds CRLF to shell files, run:
-
-```bash
-python3 init-config.py
-```
-
-It normalizes config files before applying hooks.
-
----
-
-## Optional: IDA MCP with uv tool
-
-Windows-side `idalib-mcp` setup for cc-switch / Codex / Claude Code.
-
-### 1. Install uv
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-
-Reopen PowerShell:
-
-```powershell
-uv --version
-```
-
-### 2. Install ida-pro-mcp
-
-```powershell
-uv tool install "ida-pro-mcp @ https://github.com/mrexodia/ida-pro-mcp/archive/refs/heads/main.zip"
-```
-
-### 3. Activate IDA path
-
-```powershell
-$IdaDir = "E:\ida"
-$ToolPy = "$(uv tool dir)\ida-pro-mcp\Scripts\python.exe"
-& $ToolPy "$IdaDir\idalib\python\py-activate-idalib.py" -d "$IdaDir"
-```
-
-Change `E:\ida` to your IDA directory.
-
-### 4. Get idalib-mcp path
-
-```powershell
-$IdalibMcp = "$(uv tool dir)\ida-pro-mcp\Scripts\idalib-mcp.exe"
-Write-Host $IdalibMcp
-```
-
-Use the printed path in cc-switch / Codex / Claude Code.
-
-### 5. MCP config
-
-Type:
-
-```text
-Custom / stdio
-```
-
-Command:
-
-```text
-<path from step 4>
-```
-
-Arguments:
-
-```text
---stdio-shared
-```
-
-JSON example:
-
-```json
-{
-  "type": "stdio",
-  "command": "C:\\Users\\<USER>\\AppData\\Roaming\\uv\\tools\\ida-pro-mcp\\Scripts\\idalib-mcp.exe",
-  "args": ["--stdio-shared"]
-}
-```
-
-Test in Codex / Claude Code:
-
-```text
-/mcp
-```
+- 仅支持使用 APT 的 Ubuntu、Debian、Kali 和 WSL 环境。
+- 不会执行 `apt full-upgrade` 或 `apt autoremove`。
+- 请直接以普通用户运行；脚本会在需要时调用 `sudo`。
+- i386/multilib 仅在 x86_64/amd64 上启用。
+- 不再包含 `pwnnew`、payload 模板和交互安装菜单。
