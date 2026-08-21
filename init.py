@@ -40,15 +40,26 @@ APT_UPDATE_WARN_PATTERNS = (
 )
 
 REQUIRED_APT = [
-    "ca-certificates", "curl", "wget", "git",
-    "unzip", "zip", "xz-utils", "tar", "gzip", "bzip2", "p7zip-full",
-    "pkg-config", "file", "tmux", "socat", "netcat-openbsd", "openssh-client",
-    "build-essential", "libssl-dev", "libffi-dev",
-    "autoconf", "automake", "libtool", "cmake",
+    "ca-certificates", "gnupg", "curl", "wget", "git", "rsync", "sudo",
+    "unzip", "zip", "xz-utils", "zstd", "tar", "gzip", "bzip2", "p7zip-full",
+    "cpio", "rpm2cpio",
+    "pkg-config", "file", "vim", "nano", "tmux", "tree",
+    "socat", "netcat-openbsd", "openssh-client",
+    "build-essential", "libssl-dev", "libffi-dev", "dkms",
+    "autoconf", "automake", "libtool", "cmake", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
+    "python3-venv", "python-is-python3",
+    "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "ltrace", "strace", "checksec", "libseccomp-dev", "seccomp", "libc6-dbg",
-    "qemu-user", "qemu-user-static", "ruby-full",
+    "qemu-user", "qemu-system", "qemu-user-binfmt",
+    "net-tools", "dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
+    "tcpdump", "nmap", "lsof", "fail2ban", "ufw",
+]
+
+OPTIONAL_APT = [
+    "bat", "fd-find", "ripgrep", "fzf", "zoxide", "duf", "gdu", "btop",
+    "htop", "ncdu", "jq", "yq", "hyfetch",
 ]
 
 I386_APT = [
@@ -160,7 +171,6 @@ class Bootstrap:
         candidates = [
             HOME / ".local" / "bin",
             HOME / ".cargo" / "bin",
-            *sorted((HOME / ".local" / "share" / "gem" / "ruby").glob("*/bin")),
         ]
         current = os.environ.get("PATH", "").split(os.pathsep)
         for candidate in reversed(candidates):
@@ -357,8 +367,39 @@ class Bootstrap:
 
     def install_system_packages(self) -> None:
         self.section("System packages")
+        if self.distro["id"] == "ubuntu":
+            if self.apt_install(
+                ["software-properties-common"],
+                "Ubuntu repository support",
+                required=True,
+            ):
+                result = self.run(
+                    ["add-apt-repository", "-y", "universe"],
+                    sudo=True,
+                    check=False,
+                    network=True,
+                    env=self.apt_env(),
+                )
+                if result.returncode != 0:
+                    self.failures.append("failed to enable the Ubuntu universe repository")
+                self.apt_updated = False
         i386 = self.enable_i386()
         self.apt_install([*REQUIRED_APT, *i386], "required packages", required=True)
+        self.apt_install(OPTIONAL_APT, "daily-use tools", required=False)
+        self.install_command_links()
+
+    def install_command_links(self) -> None:
+        for source, target in (("batcat", "bat"), ("fdfind", "fd")):
+            executable = shutil.which(source)
+            if executable is None:
+                continue
+            result = self.run(
+                ["ln", "-sf", executable, f"/usr/local/bin/{target}"],
+                sudo=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                self.skipped.append(f"command link failed: {target}")
 
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
@@ -376,16 +417,18 @@ class Bootstrap:
             self.warn("this pip version does not support --break-system-packages; continuing in compatibility mode")
         result = self.run(
             [
-                python, "-m", "pip", "install", "--user", *break_flag,
+                python, "-m", "pip", "install", *break_flag,
                 "--disable-pip-version-check", *PYTHON_PACKAGES,
             ],
+            sudo=True,
             check=False,
             network=True,
+            env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
         if result.returncode != 0:
             self.failures.append("Python Pwn package installation failed")
         else:
-            self.ok("Python tools installed into the user site (~/.local)")
+            self.ok("Python tools installed system-wide")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -396,7 +439,8 @@ class Bootstrap:
             self.ok("Ruby Pwn tools: already installed")
             return
         result = self.run(
-            ["gem", "install", "--user-install", "--no-document", *missing],
+            ["gem", "install", "--no-document", *missing],
+            sudo=True,
             check=False,
             network=True,
         )
