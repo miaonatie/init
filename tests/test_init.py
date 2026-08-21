@@ -45,6 +45,29 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.bootstrap.run.call_count, MODULE.NETWORK_ATTEMPTS)
         self.assertIn("APT index update failed", self.bootstrap.failures)
 
+    def test_apt_install_excludes_unavailable_packages_before_batch(self):
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.package_available = mock.Mock(side_effect=lambda package: package != "gone")
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["apt-get"], 0, stdout="", stderr="")
+        )
+        self.assertFalse(self.bootstrap.apt_install(["kept", "gone"], "test", required=True))
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("kept", command)
+        self.assertNotIn("gone", command)
+        self.assertIn("APT package unavailable: gone", self.bootstrap.failures)
+
+    def test_apt_install_does_not_duplicate_apt_network_retries(self):
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.package_available = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["apt-get"], 0, stdout="", stderr="")
+        )
+        self.assertTrue(self.bootstrap.apt_install(["sample"], "test", required=True))
+        self.assertNotIn("network", self.bootstrap.run.call_args.kwargs)
+
     def test_existing_repository_is_not_updated(self):
         with tempfile.TemporaryDirectory() as directory:
             tools_dir = Path(directory)
@@ -267,9 +290,10 @@ class InstallerTests(unittest.TestCase):
         expected = {
             "clang", "llvm", "lld", "ninja-build", "meson", "default-jdk",
             "radare2", "libradare2-dev", "qemu-user", "qemu-system", "hyfetch",
-            "xxd", "hexyl", "zsh", "shellcheck", "bash-completion",
+            "xxd", "zsh", "shellcheck", "bash-completion",
         }
         self.assertTrue(expected <= packages)
+        self.assertNotIn("hexyl", packages)
         self.assertNotIn("python3-venv", packages)
         self.assertNotIn("pipx", packages)
 
