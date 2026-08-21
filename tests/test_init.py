@@ -1,7 +1,9 @@
 import importlib.util
+import io
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -99,6 +101,15 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("--user", command)
         self.assertIn("--break-system-packages", command)
         self.assertNotIn("venv", command)
+
+    def test_progress_output_is_plain_text(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.bootstrap.section("Example")
+        text = output.getvalue()
+        self.assertIn("[01/09] Example", text)
+        self.assertIn("elapsed 00:00:00", text)
+        self.assertNotIn("\033", text)
 
 
 if __name__ == "__main__":

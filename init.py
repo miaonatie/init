@@ -98,31 +98,39 @@ class Bootstrap:
         self.skipped: list[str] = []
         self.warnings: list[str] = []
         self.started_at = time.time()
+        self.started_monotonic = time.monotonic()
+        self.step = 0
+        self.step_total = 9
         self.apt_updated = False
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
         self.is_wsl = self.detect_wsl()
-        self.color = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
         self._extend_path()
 
-    def paint(self, code: str, text: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self.color else text
-
     def info(self, message: str) -> None:
-        print(self.paint("36", "[INFO]"), message)
+        print(f"INFO: {message}")
 
     def ok(self, message: str) -> None:
-        print(self.paint("32", "[ OK ]"), message)
+        print(f"OK: {message}")
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
-        print(self.paint("33", "[WARN]"), message)
+        print(f"WARN: {message}")
 
     def error(self, message: str) -> None:
-        print(self.paint("31", "[FAIL]"), message, file=sys.stderr)
+        print(f"ERROR: {message}", file=sys.stderr)
+
+    @staticmethod
+    def format_duration(seconds: float) -> str:
+        total = max(0, int(seconds))
+        hours, remainder = divmod(total, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def section(self, title: str) -> None:
-        print(f"\n{self.paint('34;1', '==>')} {title}")
+        self.step += 1
+        elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
+        print(f"\n[{self.step:02d}/{self.step_total:02d}] {title} | elapsed {elapsed}")
 
     @staticmethod
     def command_exists(command: str) -> bool:
@@ -596,6 +604,8 @@ class Bootstrap:
         self.ok(f"configuration synced to {CONFIG_TARGET}")
 
     def clean(self) -> int:
+        self.step = 0
+        self.step_total = 1
         self.section("Remove configuration")
         targets = [
             (HOME / ".bashrc", "init-shell"),
@@ -698,6 +708,7 @@ class Bootstrap:
 
     def summary(self) -> int:
         self.section("Result")
+        elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
         if self.skipped:
             print("Skipped:")
             for item in self.skipped:
@@ -706,13 +717,14 @@ class Bootstrap:
             print("Failures:")
             for item in self.failures:
                 print(f"  - {item}")
-            self.error(f"completed with {len(self.failures)} failure(s)")
+            self.error(f"completed with {len(self.failures)} failure(s) in {elapsed}")
             return 1
-        self.ok("installation, configuration, and verification completed")
+        self.ok(f"installation, configuration, and verification completed in {elapsed}")
         return 0
 
     def install(self) -> int:
-        print(self.paint("36;1", f"init {VERSION}"))
+        print(f"init {VERSION}")
+        print("Mode: non-interactive")
         self.preflight()
         self.install_system_packages()
         self.install_python_tools()
