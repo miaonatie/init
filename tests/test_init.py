@@ -66,6 +66,7 @@ class InstallerTests(unittest.TestCase):
         command = install_call.args[0]
         self.assertNotIn("--user", command)
         self.assertIn("--break-system-packages", command)
+        self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
         self.assertTrue(install_call.kwargs["sudo"])
 
@@ -194,6 +195,61 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("[01/04] Example", text)
         self.assertIn("elapsed 00:00:00", text)
         self.assertNotIn("\033", text)
+
+    def test_stage_runner_reports_stage_duration(self):
+        output = io.StringIO()
+        action = mock.Mock()
+        self.bootstrap.started_monotonic = 100
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=[100, 100, 102]):
+            with redirect_stdout(output):
+                self.bootstrap.run_stage("CTF toolchain", action)
+        action.assert_called_once_with()
+        text = output.getvalue()
+        self.assertIn("[01/04] CTF toolchain", text)
+        self.assertIn("CTF toolchain finished in 00:00:02", text)
+
+    def test_stage_runner_does_not_report_success_after_recorded_failure(self):
+        def action():
+            self.bootstrap.failures.append("example")
+
+        output = io.StringIO()
+        self.bootstrap.started_monotonic = 100
+        with mock.patch.object(MODULE.time, "monotonic", side_effect=[100, 100, 101]):
+            with redirect_stdout(output):
+                self.bootstrap.run_stage("CTF toolchain", action)
+        text = output.getvalue()
+        self.assertIn("WARN: CTF toolchain finished with 1 failure(s) in 00:00:01", text)
+        self.assertNotIn("OK: CTF toolchain finished", text)
+
+    def test_install_uses_four_ctf_environment_stages(self):
+        self.bootstrap.run_stage = mock.Mock()
+        self.bootstrap.summary = mock.Mock(return_value=0)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(self.bootstrap.install(), 0)
+        titles = [call.args[0] for call in self.bootstrap.run_stage.call_args_list]
+        self.assertEqual(
+            titles,
+            ["Environment check", "System foundation", "CTF toolchain", "Verification"],
+        )
+
+    def test_system_packages_are_installed_in_bounded_groups(self):
+        self.bootstrap.distro = {"id": "kali"}
+        self.bootstrap.enable_i386 = mock.Mock(return_value=list(MODULE.I386_APT))
+        self.bootstrap.apt_install = mock.Mock(return_value=True)
+        self.bootstrap.install_command_links = mock.Mock()
+        self.bootstrap.install_docker = mock.Mock()
+        self.bootstrap.install_system_foundation()
+        calls = self.bootstrap.apt_install.call_args_list
+        self.assertEqual([call.args[1] for call in calls], [
+            "system and development packages",
+            "daily CLI tools",
+            "CTF CLI tools",
+            "32-bit development support",
+        ])
+        self.assertEqual(calls[0].args[0], MODULE.REQUIRED_APT)
+        self.assertEqual(calls[1].args[0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
+        self.assertEqual(calls[2].args[0], MODULE.CTF_APT)
+        self.assertEqual(calls[3].args[0], MODULE.I386_APT)
 
     def test_color_output_when_enabled(self):
         self.bootstrap.color = True

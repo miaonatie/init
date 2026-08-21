@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Idempotent Pwn/CTF workstation bootstrap for Debian-family systems."""
+"""Idempotent CTF workstation bootstrap for Ubuntu and Kali."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 
@@ -179,6 +179,18 @@ class Bootstrap:
         timing = self.colorize("2", f"elapsed {elapsed}")
         print(f"\n{stage} | {timing}")
 
+    def run_stage(self, title: str, action: Callable[[], object]) -> None:
+        self.section(title)
+        started = time.monotonic()
+        failures_before = len(self.failures)
+        action()
+        duration = self.format_duration(time.monotonic() - started)
+        new_failures = len(self.failures) - failures_before
+        if new_failures:
+            self.warn(f"{title} finished with {new_failures} failure(s) in {duration}")
+        else:
+            self.ok(f"{title} finished in {duration}")
+
     @staticmethod
     def command_exists(command: str) -> bool:
         return shutil.which(command) is not None
@@ -315,7 +327,6 @@ class Bootstrap:
         self.run(["sudo", "-v"])
 
     def preflight(self) -> None:
-        self.section("Preflight")
         if sys.platform != "linux":
             raise RuntimeError("this installer supports Linux and WSL only")
         if not self.command_exists("apt-get") or not self.command_exists("dpkg-query"):
@@ -454,8 +465,7 @@ class Bootstrap:
                 (self.failures if required else self.skipped).append(message)
         return ok_all
 
-    def install_system_packages(self) -> None:
-        self.section("System packages")
+    def install_system_foundation(self) -> None:
         if self.distro["id"] == "ubuntu":
             if self.ubuntu_universe_enabled():
                 self.ok("Ubuntu universe repository: already enabled")
@@ -476,11 +486,13 @@ class Bootstrap:
                 self.apt_updated = False
         i386 = self.enable_i386()
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
+        self.apt_install(REQUIRED_APT, "system and development packages", required=True)
         self.apt_install(
-            [*REQUIRED_APT, *DAILY_APT, *CTF_APT, *distro_packages, *i386],
-            "all packages",
-            required=True,
+            [*DAILY_APT, *distro_packages], "daily CLI tools", required=True
         )
+        self.apt_install(CTF_APT, "CTF CLI tools", required=True)
+        if i386:
+            self.apt_install(i386, "32-bit development support", required=True)
         self.install_command_links()
         self.install_docker()
 
@@ -723,9 +735,12 @@ class Bootstrap:
             [
                 python,
                 "-c",
-                "import importlib.util; print('\\n'.join(m for m in "
+                "import importlib; modules="
                 + repr(PYTHON_IMPORTS)
-                + " if importlib.util.find_spec(m) is None))",
+                + "; failed=[]\nfor module in modules:\n"
+                + " try: importlib.import_module(module)\n"
+                + " except Exception: failed.append(module)\n"
+                + "print('\\n'.join(failed))",
             ],
             check=False,
             capture=True,
@@ -748,7 +763,7 @@ class Bootstrap:
         result = self.run(
             [
                 python, "-m", "pip", "install", "--break-system-packages",
-                "--disable-pip-version-check", *missing,
+                "--disable-pip-version-check", "--upgrade", *missing,
             ],
             sudo=True,
             check=False,
@@ -756,9 +771,9 @@ class Bootstrap:
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
         if result.returncode != 0:
-            self.failures.append("Python Pwn package installation failed")
+            self.failures.append("Python CTF package installation failed")
         else:
-            self.ok("Python tools installed system-wide")
+            self.ok("Python CTF tools installed system-wide")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -766,7 +781,7 @@ class Bootstrap:
             return
         missing = [gem for gem in RUBY_GEMS if not self.command_exists(gem)]
         if not missing:
-            self.ok("Ruby Pwn tools: already installed")
+            self.ok("Ruby CTF tools: already installed")
             return
         result = self.run(
             ["gem", "install", "--no-document", *missing],
@@ -776,7 +791,7 @@ class Bootstrap:
         )
         self._extend_path()
         if result.returncode != 0:
-            self.failures.append("Ruby Pwn tool installation failed")
+            self.failures.append("Ruby CTF tool installation failed")
 
     def r2ghidra_available(self) -> bool:
         if not self.command_exists("r2"):
@@ -912,8 +927,7 @@ class Bootstrap:
                 except OSError:
                     pass
 
-    def install_pwn_tools(self) -> None:
-        self.section("Pwn tools")
+    def install_ctf_toolchain(self) -> None:
         self.install_python2_legacy()
         self.install_python_tools()
         self.install_ruby_tools()
@@ -932,7 +946,6 @@ class Bootstrap:
     def verify(self) -> bool:
         checks = [
             ("python3", ["python3"]),
-            ("python2", ["python2"]),
             ("git", ["git"]),
             ("gcc", ["gcc"]),
             ("g++", ["g++"]),
@@ -968,8 +981,6 @@ class Bootstrap:
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
             ("one_gadget", ["one_gadget"]),
             ("seccomp-tools", ["seccomp-tools"]),
-            ("docker", ["docker"]),
-            ("containerd", ["containerd"]),
         ]
         ok_all = True
         for label, names in checks:
@@ -1009,10 +1020,10 @@ class Bootstrap:
             capture=True,
         )
         if imports.returncode == 0:
-            self.ok("Python Pwn libraries")
+            self.ok("Python CTF libraries")
         else:
             ok_all = False
-            message = "verification failed: Python Pwn library import failed"
+            message = "verification failed: Python CTF library import failed"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)
@@ -1040,17 +1051,16 @@ class Bootstrap:
                 print(f"  - {item}")
             self.error(f"completed with {len(self.failures)} failure(s) in {elapsed}")
             return 1
-        self.ok(f"installation and verification completed in {elapsed}")
+        self.ok(f"CTF environment installation and verification completed in {elapsed}")
         return 0
 
     def install(self) -> int:
         print(self.colorize("36;1", f"init {VERSION}"))
-        print("Mode: non-interactive")
-        self.preflight()
-        self.install_system_packages()
-        self.install_pwn_tools()
-        self.section("Verification")
-        self.verify()
+        print("Target: CTF workstation | Mode: non-interactive")
+        self.run_stage("Environment check", self.preflight)
+        self.run_stage("System foundation", self.install_system_foundation)
+        self.run_stage("CTF toolchain", self.install_ctf_toolchain)
+        self.run_stage("Verification", self.verify)
         return self.summary()
 
 
@@ -1058,7 +1068,7 @@ def help_text() -> str:
     return f"""init {VERSION}
 
 Usage:
-  python3 init.py          Install and verify
+  python3 init.py          Initialize and verify the CTF environment
   python3 init.py --help   Show this help
 
 The default operation is safe to rerun. It does not run full-upgrade or autoremove.

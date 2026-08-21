@@ -1,6 +1,6 @@
-# init v3.6
+# init v3.7
 
-Ubuntu 24.04+ / 最新 Kali 的一次性命令行环境初始化工具。
+Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
 ## 使用
 
@@ -10,7 +10,8 @@ cd init
 python3 init.py
 ```
 
-脚本分为 4 个阶段：环境检查、系统/CTF 软件包与 Docker CE、Pwn 工具、最终验证。
+脚本分为 4 个阶段：环境检查、系统基础环境、CTF 工具链、最终验证。
+系统软件包按系统开发、日常 CLI、CTF CLI、32 位支持分批处理，失败定位和重试更快。
 已有的软件会先检查并跳过；可重复运行。
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
