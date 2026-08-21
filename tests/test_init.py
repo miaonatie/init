@@ -51,7 +51,7 @@ class InstallerTests(unittest.TestCase):
                 )
             self.assertIn("repository update failed: sample", self.bootstrap.failures)
 
-    def test_python_install_uses_break_system_packages(self):
+    def test_python_install_uses_break_system_packages_globally(self):
         help_result = subprocess.CompletedProcess(
             ["python3", "-m", "pip", "install", "--help"],
             0,
@@ -61,10 +61,12 @@ class InstallerTests(unittest.TestCase):
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
         self.bootstrap.run = mock.Mock(side_effect=[help_result, install_result])
         self.bootstrap.install_python_tools()
-        command = self.bootstrap.run.call_args_list[1].args[0]
-        self.assertIn("--user", command)
+        install_call = self.bootstrap.run.call_args_list[1]
+        command = install_call.args[0]
+        self.assertNotIn("--user", command)
         self.assertIn("--break-system-packages", command)
         self.assertNotIn("venv", command)
+        self.assertTrue(install_call.kwargs["sudo"])
 
     def test_progress_output_is_plain_text_when_not_tty(self):
         output = io.StringIO()
