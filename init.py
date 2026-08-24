@@ -813,35 +813,57 @@ class Bootstrap:
         if not self.command_exists("r2"):
             return False
         result = self.run(
-            ["r2", "-q", "-c", "pdg?", "-c", "q", "/bin/true"],
+            ["r2", "-q", "-c", "pdg?;q", "/bin/true"],
             check=False,
             capture=True,
             timeout=30,
         )
         output = ((result.stdout or "") + (result.stderr or "")).lower()
-        return result.returncode == 0 and (
-            "native ghidra decompiler" in output or "r2ghidra" in output
-        )
+        return result.returncode == 0 and "native ghidra decompiler" in output
 
     def install_r2ghidra(self) -> None:
         if self.r2ghidra_available():
-            self.ok("r2ghidra: already installed")
+            self.ok("r2ghidra: already installed and loadable")
             return
         if not self.command_exists("r2pm"):
-            self.failures.append("r2ghidra installation failed: r2pm is unavailable")
-            return
-        for command in (["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]):
-            result = self.run(
-                command,
-                check=False,
-                network=True,
-                timeout=1800,
+            self.failures.append(
+                "r2ghidra installation failed: r2pm is unavailable; "
+                "verify the radare2 package installation"
             )
-            if result.returncode != 0:
-                self.failures.append("r2ghidra installation failed")
-                return
-        if not self.r2ghidra_available():
-            self.failures.append("r2ghidra installation failed: plugin was not detected")
+            return
+
+        self.info("r2ghidra: updating the r2pm package database")
+        update = self.run(
+            ["r2pm", "-U"],
+            check=False,
+            network=True,
+            timeout=300,
+        )
+        if update.returncode != 0:
+            self.failures.append(
+                "r2ghidra installation failed: r2pm -U could not update the package database"
+            )
+            return
+
+        self.info("r2ghidra: clean-building the plugin; this may take several minutes")
+        install = self.run(
+            ["r2pm", "-ci", "r2ghidra"],
+            check=False,
+            timeout=1800,
+        )
+        if install.returncode != 0:
+            self.failures.append(
+                "r2ghidra installation failed: r2pm -ci r2ghidra returned an error"
+            )
+            return
+
+        if self.r2ghidra_available():
+            self.ok("r2ghidra installed and verified with pdg?")
+        else:
+            self.failures.append(
+                "r2ghidra installation finished but pdg was not loadable; "
+                "check that radare2 and libradare2-dev have matching versions"
+            )
 
     def clone_or_update(self, name: str, url: str) -> bool:
         destination = TOOLS_DIR / name
@@ -975,6 +997,7 @@ class Bootstrap:
             ("patchelf", ["patchelf"]),
             ("xxd", ["xxd"]),
             ("radare2", ["r2"]),
+            ("r2pm", ["r2pm"]),
             ("qemu-user", ["qemu-x86_64"]),
             ("qemu-system", ["qemu-system-x86_64"]),
             ("bat", ["bat"]),

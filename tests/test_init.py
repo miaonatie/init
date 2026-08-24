@@ -319,7 +319,28 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_r2ghidra()
         commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
         self.assertEqual(commands, [["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]])
+        self.assertTrue(self.bootstrap.run.call_args_list[0].kwargs["network"])
+        self.assertNotIn("network", self.bootstrap.run.call_args_list[1].kwargs)
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_r2ghidra_stops_when_r2pm_database_update_fails(self):
+        self.bootstrap.r2ghidra_available = mock.Mock(return_value=False)
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["r2pm", "-U"], 1)
+        )
+        self.bootstrap.install_r2ghidra()
+        self.bootstrap.run.assert_called_once()
+        self.assertIn("r2pm -U", self.bootstrap.failures[0])
+
+    def test_r2ghidra_reports_unloadable_plugin_after_install(self):
+        self.bootstrap.r2ghidra_available = mock.Mock(return_value=False)
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["r2pm"], 0)
+        )
+        self.bootstrap.install_r2ghidra()
+        self.assertIn("matching versions", self.bootstrap.failures[0])
 
 
 if __name__ == "__main__":
