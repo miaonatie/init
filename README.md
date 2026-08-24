@@ -1,4 +1,4 @@
-# init v3.9
+# init v3.10
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -20,15 +20,24 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
 - Python 2.7 通过 pyenv 隔离安装，仅提供 `python2` / `pip2`，不会改变系统 `python`。
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
+- radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
 
 全新安装通常占用约 8–12 GiB（不含以后下载的 Docker 镜像），建议预留 15 GiB。
 脚本会按缺失内容动态检查空间：完整安装至少 10 GiB，少量补装至少 3 GiB，纯复查至少 1 GiB。
 
 
-## r2ghidra 安装与验证
+## radare2 与 r2ghidra 安装
 
-脚本按官方顺序执行：
+当前 r2ghidra 要求 radare2 不低于 6.1.4。脚本不再使用可能过旧的发行版 radare2 包，而是先检查实际版本；不足时按 radare2 官方方式执行：
+
+```bash
+git clone --depth 1 https://github.com/radareorg/radare2.git ~/tools/radare2
+cd ~/tools/radare2
+sh sys/install.sh --install --without-pull
+```
+
+新版会安装到 `/usr/local`，通常会优先于旧的 `/usr/bin/r2`。确认版本合格后，再按官方顺序安装 r2ghidra：
 
 ```bash
 r2pm -U
@@ -40,6 +49,8 @@ r2pm -ci r2ghidra
 手动验证：
 
 ```bash
+which r2
+r2 -v
 r2pm -l
 r2 -q -c 'pdg?;q' /bin/true
 ```

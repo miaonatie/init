@@ -289,10 +289,11 @@ class InstallerTests(unittest.TestCase):
         packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT) | set(MODULE.CTF_APT)
         expected = {
             "clang", "llvm", "lld", "ninja-build", "meson", "default-jdk",
-            "radare2", "libradare2-dev", "qemu-user", "qemu-system", "hyfetch",
+            "qemu-user", "qemu-system", "hyfetch",
             "xxd", "zsh", "shellcheck", "bash-completion",
         }
         self.assertTrue(expected <= packages)
+        self.assertFalse({"radare2", "libradare2-dev"} & packages)
         self.assertNotIn("hexyl", packages)
         self.assertNotIn("python3-venv", packages)
         self.assertNotIn("pipx", packages)
@@ -309,6 +310,51 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("zsteg", MODULE.RUBY_GEMS)
         self.assertNotIn("hexedit", packages)
         self.assertFalse({"fail2ban", "ufw", "dkms"} & packages)
+
+    def test_radare2_version_is_parsed(self):
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["r2", "-v"], 0, stdout="radare2 6.2.1 0 @ linux-x86-64\n", stderr=""
+            )
+        )
+        self.assertEqual(self.bootstrap.radare2_version(), (6, 2, 1))
+
+    def test_compatible_radare2_is_not_rebuilt(self):
+        self.bootstrap.radare2_version = mock.Mock(return_value=(6, 2, 1))
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock()
+        self.assertTrue(self.bootstrap.install_radare2())
+        self.bootstrap.run.assert_not_called()
+
+    def test_old_radare2_is_updated_from_official_git(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tools_dir = Path(directory)
+            source = tools_dir / "radare2"
+            (source / ".git").mkdir(parents=True)
+            (source / "sys").mkdir()
+            (source / "sys" / "install.sh").touch()
+            self.bootstrap.radare2_version = mock.Mock(
+                side_effect=[(5, 9, 8), (6, 2, 1)]
+            )
+            self.bootstrap.command_exists = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["command"], 0, stdout="", stderr="")
+            )
+            with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
+                self.assertTrue(self.bootstrap.install_radare2())
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertEqual(
+                commands[0],
+                ["git", "-C", str(source), "pull", "--ff-only", "origin", "master"],
+            )
+            self.assertEqual(
+                commands[1],
+                [
+                    "sh", str(source / "sys" / "install.sh"),
+                    "--install", "--without-pull",
+                ],
+            )
 
     def test_r2ghidra_uses_official_r2pm_installer(self):
         self.bootstrap.r2ghidra_available = mock.Mock(side_effect=[False, True])

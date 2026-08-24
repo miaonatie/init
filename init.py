@@ -54,7 +54,7 @@ REQUIRED_APT = [
     "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
     "elfutils", "xxd", "ltrace", "strace", "checksec",
-    "libseccomp-dev", "seccomp", "libc6-dbg", "radare2", "libradare2-dev",
+    "libseccomp-dev", "seccomp", "libc6-dbg",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
     "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
     "tcpdump", "nmap", "lsof", "zsh", "shellcheck", "bash-completion",
@@ -120,6 +120,9 @@ ALLOWED_INSTALLER_HOSTS = {"install.pwndbg.re"}
 
 PYTHON2_VERSION = "2.7.18"
 PYENV_URL = "https://github.com/pyenv/pyenv.git"
+
+RADARE2_MIN_VERSION = (6, 1, 4)
+RADARE2_URL = "https://github.com/radareorg/radare2.git"
 
 DOCKER_PACKAGES = [
     "docker-ce", "docker-ce-cli", "containerd.io",
@@ -246,6 +249,7 @@ class Bootstrap:
 
     def _extend_path(self) -> None:
         candidates = [
+            Path("/usr/local/bin"),
             HOME / ".local" / "bin",
             HOME / ".cargo" / "bin",
         ]
@@ -809,6 +813,116 @@ class Bootstrap:
         if result.returncode != 0:
             self.failures.append("Ruby CTF tool installation failed")
 
+    @staticmethod
+    def format_version(version: tuple[int, int, int]) -> str:
+        return ".".join(str(part) for part in version)
+
+    def radare2_version(self) -> tuple[int, int, int] | None:
+        self._extend_path()
+        if not self.command_exists("r2"):
+            return None
+        result = self.run(
+            ["r2", "-v"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        output = (result.stdout or "") + (result.stderr or "")
+        match = re.search(r"\bradare2\s+(\d+)\.(\d+)\.(\d+)\b", output, re.IGNORECASE)
+        if result.returncode != 0 or match is None:
+            return None
+        return tuple(int(part) for part in match.groups())
+
+    def radare2_ready(self) -> bool:
+        version = self.radare2_version()
+        return (
+            version is not None
+            and version >= RADARE2_MIN_VERSION
+            and self.command_exists("r2pm")
+        )
+
+    def install_radare2(self) -> bool:
+        current = self.radare2_version()
+        if (
+            current is not None
+            and current >= RADARE2_MIN_VERSION
+            and self.command_exists("r2pm")
+        ):
+            self.ok(f"radare2 {self.format_version(current)}: already compatible")
+            return True
+
+        required = self.format_version(RADARE2_MIN_VERSION)
+        if current is None:
+            self.info(f"radare2 >= {required} is not installed; building the official Git version")
+        else:
+            self.warn(
+                f"radare2 {self.format_version(current)} is too old; "
+                f"r2ghidra requires >= {required}"
+            )
+
+        destination = TOOLS_DIR / "radare2"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        git_env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+
+        if (destination / ".git").exists():
+            self.info("radare2: updating the existing official Git checkout")
+            source = self.run(
+                ["git", "-C", str(destination), "pull", "--ff-only", "origin", "master"],
+                env=git_env,
+                check=False,
+                network=True,
+                timeout=300,
+            )
+        elif destination.exists():
+            self.failures.append(
+                f"radare2 source path exists but is not a Git repository: {destination}"
+            )
+            return False
+        else:
+            self.info("radare2: cloning the official Git repository")
+            source = self.run(
+                ["git", "clone", "--depth", "1", RADARE2_URL, str(destination)],
+                env=git_env,
+                check=False,
+                network=True,
+                timeout=300,
+            )
+
+        if source.returncode != 0:
+            self.failures.append("radare2 official source download/update failed")
+            return False
+
+        self.info("radare2: building and installing to /usr/local")
+        build = self.run(
+            ["sh", str(destination / "sys" / "install.sh"), "--install", "--without-pull"],
+            cwd=destination,
+            env={"MAKEFLAGS": f"-j{max(1, os.cpu_count() or 1)}"},
+            check=False,
+            timeout=1800,
+        )
+        self._extend_path()
+        if build.returncode != 0:
+            self.failures.append("radare2 official source build/install failed")
+            return False
+
+        installed = self.radare2_version()
+        if (
+            installed is None
+            or installed < RADARE2_MIN_VERSION
+            or not self.command_exists("r2pm")
+        ):
+            detected = "not found" if installed is None else self.format_version(installed)
+            self.failures.append(
+                f"radare2 source installation finished but compatible tools were not detected "
+                f"(detected version: {detected}; required: >= {required})"
+            )
+            return False
+
+        self.ok(
+            f"radare2 {self.format_version(installed)} installed from the official Git source"
+        )
+        return True
+
     def r2ghidra_available(self) -> bool:
         if not self.command_exists("r2"):
             return False
@@ -969,7 +1083,8 @@ class Bootstrap:
         self.install_python2_legacy()
         self.install_python_tools()
         self.install_ruby_tools()
-        self.install_r2ghidra()
+        if self.install_radare2():
+            self.install_r2ghidra()
         self.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
         self.install_helper_repositories()
 
@@ -996,8 +1111,6 @@ class Bootstrap:
             ("checksec", ["checksec"]),
             ("patchelf", ["patchelf"]),
             ("xxd", ["xxd"]),
-            ("radare2", ["r2"]),
-            ("r2pm", ["r2pm"]),
             ("qemu-user", ["qemu-x86_64"]),
             ("qemu-system", ["qemu-system-x86_64"]),
             ("bat", ["bat"]),
@@ -1033,6 +1146,37 @@ class Bootstrap:
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
+
+        radare2_version = self.radare2_version()
+        if radare2_version is not None and radare2_version >= RADARE2_MIN_VERSION:
+            self.ok(
+                f"radare2: {self.find_command(['r2'])} "
+                f"(version {self.format_version(radare2_version)})"
+            )
+        else:
+            ok_all = False
+            detected = (
+                "not found"
+                if radare2_version is None
+                else self.format_version(radare2_version)
+            )
+            message = (
+                f"verification failed: radare2 {detected}; "
+                f">= {self.format_version(RADARE2_MIN_VERSION)} required"
+            )
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        r2pm = self.find_command(["r2pm"])
+        if r2pm:
+            self.ok(f"r2pm: {r2pm}")
+        else:
+            ok_all = False
+            message = "verification failed: r2pm not found"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
 
         python2 = self.existing_python2()
         if python2 is not None:
