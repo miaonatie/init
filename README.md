@@ -1,4 +1,4 @@
-# init v3.13
+# init v3.14
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -19,6 +19,8 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
 - Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令，不会改变系统 `python`。
+- Node.js 通过 `~/tools/nvm` 管理，安装当前 LTS、npm、Corepack、pnpm 和 Yarn，同时配置 Bash/Zsh。
+- Rust 通过官方 rustup 安装 stable、Cargo、rustfmt 和 Clippy，同时配置 Bash/Zsh。
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
@@ -26,8 +28,8 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 - 自动生成 Pwndbg 的 `ghidra` 快捷命令，并以托管区块安全写入 `~/.gdbinit`。
 - 脚本主动克隆的源码和 CTF 数据库统一放在 `~/tools`，包管理器自己的标准目录不强行迁移。
 
-全新安装通常占用约 8–12 GiB（不含以后下载的 Docker 镜像），建议预留 15 GiB。
-脚本会按缺失内容动态检查空间：完整安装至少 10 GiB，少量补装至少 3 GiB，纯复查至少 1 GiB。
+全新安装通常占用约 10–14 GiB（不含以后下载的 Docker 镜像），建议预留 18 GiB。
+脚本会按缺失内容动态检查空间：完整安装至少 12 GiB，少量补装至少 4 GiB，纯复查至少 1 GiB。
 
 ## 语言与构建环境
 
@@ -39,13 +41,63 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 | 汇编 | NASM、YASM、GNU binutils | x86/x86-64 汇编、链接、反汇编 |
 | Python 3 | 系统 Python 3、pip、IPython、pwntools 等 CTF 库 | 当前脚本和主力 CTF 开发环境 |
 | Python 2 | `~/tools/pyenv` 中的 2.7.18、`python2`、`pip2` | 仅运行旧 EXP、旧题目脚本 |
+| Node.js | `~/tools/nvm` 中的当前 LTS、npm、Corepack、pnpm、Yarn | JavaScript/TypeScript 工具、Web 与部分 CTF 脚本 |
+| Rust | rustup stable、Cargo、rustfmt、Clippy | Rust 题目、逆向辅助工具和高性能脚本 |
 | Ruby | Ruby、RubyGems、Bundler、one_gadget、seccomp-tools、zsteg | Pwn 和 Misc 工具 |
 | Java | 默认 JDK、JRE、`java`、`javac` | APK/Java 逆向及需要 JVM 的工具 |
 | Perl | Perl | libc-database、系统脚本和文本处理 |
 | Shell | Bash、Zsh、ShellCheck、bash-completion | 自动化脚本和日常终端环境 |
 | 构建系统 | make、Autoconf、Automake、Libtool、CMake、Ninja、Meson | 编译 radare2、r2ghidra 和其他源码工具 |
 
-Go、Rust、Node.js、PHP、Lua 和 .NET 当前不默认安装：它们不是这套 Pwn/逆向初始化的必需依赖，默认加入会增加空间和升级维护成本，需要时可单独安装或使用 Docker。
+Go、PHP、Lua 和 .NET 当前不默认安装：需要时可单独安装或使用 Docker。
+
+### Node.js、pnpm 与 Yarn
+
+Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；Node 本身始终安装当前 LTS，不把具体大版本写死。Corepack 会先更新到最新版，再启用并准备最新版 pnpm 和稳定版 Yarn：
+
+```bash
+nvm --version
+node --version
+npm --version
+corepack --version
+pnpm --version
+yarn --version
+```
+
+常用更新和切换命令：
+
+```bash
+nvm install --lts
+nvm alias default 'lts/*'
+nvm use --lts
+corepack install --global pnpm@latest
+corepack install --global yarn@stable
+```
+
+脚本会以带起止标记的托管区块更新 `~/.bashrc` 和 `~/.zshrc`，不会覆盖原有配置。安装结束后新开终端即可使用；当前 Zsh 会话可执行 `source ~/.zshrc`，Bash 则执行 `source ~/.bashrc`。
+
+### Rust 与 Cargo
+
+Rust 使用官方 rustup 的默认 profile 和 stable 工具链，默认 profile 已包含常用开发组件，脚本还会显式确认 rustfmt 与 Clippy：
+
+```bash
+rustup show
+rustc --version
+cargo --version
+rustfmt --version
+cargo clippy --version
+```
+
+创建项目和更新 stable：
+
+```bash
+cargo new demo
+cd demo
+cargo run
+rustup update stable
+```
+
+Rustup 使用自己的标准目录 `~/.rustup` 和 `~/.cargo`，避免破坏其升级、工具链覆盖及 Cargo 命令发现机制。
 
 ### Python 2 与 pip2
 
@@ -167,6 +219,7 @@ pwndbg> r2pipe pdg?
 | --- | --- | --- |
 | `~/tools/radare2` | radare2 官方源码；编译后的命令安装到 `/usr/local` | 否 |
 | `~/tools/pyenv` | 隔离的 Python 2.7.18 源码、版本和运行环境 | 仅 Python 2 运行时 |
+| `~/tools/nvm` | NVM、Node.js LTS、npm、Corepack、pnpm 和 Yarn | 仅语言运行时与包管理器 |
 | `~/tools/glibc-all-in-one` | glibc-all-in-one v2、libc 包索引和以后下载的 `libs/` | 只更新小型索引 |
 | `~/tools/libc-database` | libc 指纹识别和偏移查询脚本；以后下载的数据仍保存在该目录 | 默认不下载全部 libc |
 
@@ -195,6 +248,7 @@ cd ~/tools/libc-database
 | `~/.local/share/radare2/r2pm`、radare2 用户插件目录 | r2pm 与 r2ghidra |
 | `~/.local/share/pwndbg-python` | 专供便携版 Pwndbg 导入的 r2pipe |
 | `~/.local/share/init/gdb`、`~/.gdbinit` 托管区块 | `ghidra` 快捷命令桥接配置 |
+| `~/.cargo`、`~/.rustup` | Cargo 命令、Rust stable 工具链及 rustup 元数据 |
 | `/var/lib/docker` | Docker 镜像、容器和卷 |
 
 SecLists 当前不在默认安装内容中。完整版包含密码、目录、DNS、Fuzzing、Payload 和 WebShell 等大量列表，约 4.5GB，更偏 Web 渗透/SRC，而且在服务器上可能触发安全软件告警；直接加入会明显抬高初始化空间。需要时仍建议统一放进 `~/tools`：

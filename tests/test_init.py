@@ -262,15 +262,17 @@ class InstallerTests(unittest.TestCase):
 
     def test_disk_limits_scale_with_missing_work(self):
         self.bootstrap.package_installed = mock.Mock(return_value=False)
-        self.assertEqual(self.bootstrap.installation_space_limits(), (10, 15))
+        self.assertEqual(self.bootstrap.installation_space_limits(), (12, 18))
 
         self.bootstrap.package_installed = mock.Mock(return_value=True)
         self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))
         self.bootstrap.docker_ready = mock.Mock(return_value=True)
+        self.bootstrap.node_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
         self.assertEqual(self.bootstrap.installation_space_limits(), (1, 3))
 
         self.bootstrap.existing_python2 = mock.Mock(return_value=None)
-        self.assertEqual(self.bootstrap.installation_space_limits(), (3, 5))
+        self.assertEqual(self.bootstrap.installation_space_limits(), (4, 7))
 
     def test_progress_output_is_plain_text_when_not_tty(self):
         output = io.StringIO()
@@ -345,7 +347,99 @@ class InstallerTests(unittest.TestCase):
 
     def test_only_pwndbg_remote_installer_remains(self):
         self.assertEqual(set(MODULE.REMOTE_INSTALLERS), {"pwndbg"})
-        self.assertEqual(MODULE.ALLOWED_INSTALLER_HOSTS, {"install.pwndbg.re"})
+        self.assertEqual(
+            MODULE.ALLOWED_INSTALLER_HOSTS,
+            {"install.pwndbg.re", "raw.githubusercontent.com", "sh.rustup.rs"},
+        )
+
+    def test_node_and_rust_installers_use_pinned_or_official_sources(self):
+        self.assertEqual(MODULE.NVM_VERSION, "0.40.7")
+        self.assertEqual(
+            MODULE.NVM_URL,
+            "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.7/install.sh",
+        )
+        self.assertEqual(MODULE.RUSTUP_URL, "https://sh.rustup.rs")
+
+    def test_node_and_rust_shell_configuration_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bashrc = root / ".bashrc"
+            zshrc = root / ".zshrc"
+            bashrc.write_text("export CUSTOM_SETTING=1\n", encoding="utf-8")
+            with (
+                mock.patch.object(MODULE, "BASHRC", bashrc),
+                mock.patch.object(MODULE, "ZSHRC", zshrc),
+            ):
+                self.assertTrue(self.bootstrap.configure_node_shells())
+                self.assertTrue(self.bootstrap.configure_rust_shells())
+                self.assertTrue(self.bootstrap.configure_node_shells())
+                self.assertTrue(self.bootstrap.configure_rust_shells())
+
+            bash_text = bashrc.read_text(encoding="utf-8")
+            zsh_text = zshrc.read_text(encoding="utf-8")
+            self.assertIn("export CUSTOM_SETTING=1", bash_text)
+            for text in (bash_text, zsh_text):
+                self.assertEqual(text.count(MODULE.NVM_PROFILE_BEGIN), 1)
+                self.assertEqual(text.count(MODULE.NVM_PROFILE_END), 1)
+                self.assertEqual(text.count(MODULE.RUST_PROFILE_BEGIN), 1)
+                self.assertEqual(text.count(MODULE.RUST_PROFILE_END), 1)
+                self.assertIn('export NVM_DIR="$HOME/tools/nvm"', text)
+                self.assertIn('[ -f "$HOME/.cargo/env" ]', text)
+
+    def test_node_install_uses_lts_and_corepack_managed_package_managers(self):
+        self.bootstrap.install_nvm = mock.Mock(return_value=True)
+        self.bootstrap.configure_node_shells = mock.Mock(return_value=True)
+        self.bootstrap.run_node_shell = mock.Mock(
+            return_value=subprocess.CompletedProcess(["bash"], 0)
+        )
+        self.bootstrap.node_environment_available = mock.Mock(return_value=True)
+
+        self.bootstrap.install_node_environment()
+
+        call = self.bootstrap.run_node_shell.call_args
+        commands = call.args[0]
+        self.assertIn("nvm install --lts", commands)
+        self.assertIn("nvm alias default 'lts/*'", commands)
+        self.assertIn("nvm use --lts", commands)
+        self.assertIn("npm install --global corepack@latest", commands)
+        self.assertIn("corepack enable", commands)
+        self.assertIn("corepack install --global pnpm@latest", commands)
+        self.assertIn("corepack install --global yarn@stable", commands)
+        self.assertTrue(call.kwargs["network"])
+        self.assertEqual(call.kwargs["timeout"], 900)
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_existing_rustup_updates_stable_and_standard_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo_home = root / ".cargo"
+            rustup_home = root / ".rustup"
+            rustup = cargo_home / "bin" / "rustup"
+            rustup.parent.mkdir(parents=True)
+            rustup.touch()
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["rustup"], 0)
+            )
+            self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
+            self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
+            with (
+                mock.patch.object(MODULE, "CARGO_HOME", cargo_home),
+                mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home),
+            ):
+                self.bootstrap.install_rust_environment()
+
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertEqual(commands[0], [str(rustup), "update", "stable"])
+            self.assertEqual(commands[1], [str(rustup), "default", "stable"])
+            self.assertEqual(
+                commands[2],
+                [
+                    str(rustup), "component", "add", "--toolchain", "stable",
+                    "rustfmt", "clippy",
+                ],
+            )
+            self.assertTrue(all(call.kwargs["network"] for call in self.bootstrap.run.call_args_list))
+            self.assertEqual(self.bootstrap.failures, [])
 
     def test_extended_toolchain_keeps_direct_system_python(self):
         packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT) | set(MODULE.CTF_APT)
@@ -601,6 +695,7 @@ class InstallerTests(unittest.TestCase):
     def test_ctf_toolchain_configures_bridge_after_pwndbg(self):
         names = [
             "install_python2_legacy", "install_python_tools", "install_ruby_tools",
+            "install_node_environment", "install_rust_environment",
             "install_radare2", "install_r2ghidra", "install_remote_tool",
             "install_pwndbg_r2ghidra_bridge", "install_helper_repositories",
         ]
@@ -614,6 +709,8 @@ class InstallerTests(unittest.TestCase):
                           return_value=result),
             )
         self.bootstrap.install_ctf_toolchain()
+        self.assertLess(calls.index("install_node_environment"), calls.index("install_radare2"))
+        self.assertLess(calls.index("install_rust_environment"), calls.index("install_radare2"))
         self.assertLess(calls.index("install_remote_tool"), calls.index("install_pwndbg_r2ghidra_bridge"))
         self.assertLess(calls.index("install_pwndbg_r2ghidra_bridge"), calls.index("install_helper_repositories"))
 
