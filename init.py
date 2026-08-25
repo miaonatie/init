@@ -114,6 +114,14 @@ HELPER_REPOS = {
 
 GLIBC_AIO_DIR = TOOLS_DIR / "glibc-all-in-one"
 LIBC_DATABASE_DIR = TOOLS_DIR / "libc-database"
+GLIBC_AIO_COMMAND = Path("/usr/local/bin/glibc-aio")
+GLIBC_AIO_DEPENDENCIES = ("pyelftools", "zstandard")
+LIBC_DATABASE_COMMANDS = {
+    "libc-db-identify": "identify",
+    "libc-db-find": "find",
+    "libc-db-download": "download",
+    "libc-db-dump": "dump",
+}
 
 REMOTE_INSTALLERS = {
     "pwndbg": ("https://install.pwndbg.re", ["-t", "pwndbg-gdb", "-u"]),
@@ -158,6 +166,59 @@ DOCKER_PACKAGES = [
     "docker-ce", "docker-ce-cli", "containerd.io",
     "docker-buildx-plugin", "docker-compose-plugin",
 ]
+
+COMMAND_PROBE_ARGUMENTS = {
+    "python3": ["--version"],
+    "git": ["--version"],
+    "gcc": ["--version"],
+    "g++": ["--version"],
+    "clang": ["--version"],
+    "GNU make": ["--version"],
+    "cmake": ["--version"],
+    "ninja": ["--version"],
+    "meson": ["--version"],
+    "GNU linker": ["--version"],
+    "java": ["--version"],
+    "javac": ["--version"],
+    "ruby": ["--version"],
+    "gem": ["--version"],
+    "bundler": ["--version"],
+    "perl": ["--version"],
+    "bash": ["--version"],
+    "zsh": ["--version"],
+    "gdb": ["--version"],
+    "gdb-multiarch": ["--version"],
+    "checksec": ["--help"],
+    "patchelf": ["--version"],
+    "xxd": ["-h"],
+    "qemu-user": ["--version"],
+    "qemu-system": ["--version"],
+    "bat": ["--version"],
+    "fd": ["--version"],
+    "7z": ["i"],
+    "hyfetch": ["--version"],
+    "nasm": ["-v"],
+    "yasm": ["--version"],
+    "valgrind": ["--version"],
+    "apktool": ["--version"],
+    "steghide": ["--version"],
+    "stegseek": ["--version"],
+    "binwalk": ["--help"],
+    "zsteg": ["--version"],
+    "exiftool": ["-ver"],
+    "foremost": ["-V"],
+    "tshark": ["--version"],
+    "hashcat": ["--version"],
+    "john": ["--list=build-info"],
+    "ROPgadget": ["--help"],
+    "ropper": ["--version"],
+    "one_gadget": ["--version"],
+    "seccomp-tools": ["--version"],
+    "libc-db-identify": [],
+    "libc-db-find": [],
+    "libc-db-download": [],
+    "libc-db-dump": [],
+}
 
 DOCKER_CONFLICTS = [
     "docker.io", "docker-compose", "docker-doc", "docker-buildx",
@@ -227,6 +288,28 @@ class Bootstrap:
     @staticmethod
     def command_exists(command: str) -> bool:
         return shutil.which(command) is not None
+
+    def executable_usable(self, executable: str, arguments: list[str]) -> bool:
+        result = self.run(
+            [executable, *arguments],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        output = ((result.stdout or "") + (result.stderr or "")).lower()
+        broken_markers = (
+            "traceback (most recent call last)",
+            "modulenotfounderror",
+            "importerror",
+            "error while loading shared libraries",
+            "cannot load such file",
+            "loaderror",
+        )
+        return (
+            result.returncode >= 0
+            and result.returncode not in {124, 126, 127}
+            and not any(marker in output for marker in broken_markers)
+        )
 
     @staticmethod
     def detect_distro() -> dict[str, str]:
@@ -871,7 +954,9 @@ class Bootstrap:
             missing = list(PYTHON_IMPORT_PACKAGES)
         missing.extend(
             package for package, commands in PYTHON_COMMAND_PACKAGES.items()
-            if not any(self.command_exists(command) for command in commands)
+            if self.find_usable_command(
+                list(commands), COMMAND_PROBE_ARGUMENTS[package]
+            ) is None
         )
         if not missing:
             self.ok("Python tools: already installed")
@@ -888,14 +973,29 @@ class Bootstrap:
         )
         if result.returncode != 0:
             self.failures.append("Python CTF package installation failed")
-        else:
-            self.ok("Python CTF tools installed system-wide")
+            return
+        self._extend_path()
+        broken = [
+            package for package, commands in PYTHON_COMMAND_PACKAGES.items()
+            if self.find_usable_command(
+                list(commands), COMMAND_PROBE_ARGUMENTS[package]
+            ) is None
+        ]
+        if broken:
+            self.failures.append(
+                "Python CTF command verification failed: " + ", ".join(broken)
+            )
+            return
+        self.ok("Python CTF tools installed system-wide and launch-verified")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
             self.failures.append("RubyGems is unavailable")
             return
-        missing = [gem for gem in RUBY_GEMS if not self.command_exists(gem)]
+        missing = [
+            gem for gem in RUBY_GEMS
+            if self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]) is None
+        ]
         if not missing:
             self.ok("Ruby CTF tools: already installed")
             return
@@ -908,6 +1008,17 @@ class Bootstrap:
         self._extend_path()
         if result.returncode != 0:
             self.failures.append("Ruby CTF tool installation failed")
+            return
+        broken = [
+            gem for gem in RUBY_GEMS
+            if self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]) is None
+        ]
+        if broken:
+            self.failures.append(
+                "Ruby CTF command verification failed: " + ", ".join(broken)
+            )
+            return
+        self.ok("Ruby CTF tools installed and launch-verified")
 
     @staticmethod
     def format_version(version: tuple[int, int, int]) -> str:
@@ -1179,6 +1290,51 @@ class Bootstrap:
                 updated += "\n\n"
             updated += managed
         return self.write_text_if_changed(path, updated.rstrip("\n") + "\n")
+
+    def install_command_wrapper(self, destination: Path, content: str) -> bool:
+        wrapper: Path | None = None
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix=f"init-{destination.name}-",
+                suffix=".sh",
+                delete=False,
+            )
+            wrapper = Path(handle.name)
+            with handle:
+                handle.write(content.rstrip("\n") + "\n")
+            result = self.run(
+                ["install", "-m", "0755", str(wrapper), str(destination)],
+                sudo=True,
+                check=False,
+            )
+            return result.returncode == 0
+        except OSError:
+            return False
+        finally:
+            if wrapper is not None:
+                try:
+                    wrapper.unlink()
+                except OSError:
+                    pass
+
+    @staticmethod
+    def repository_command_wrapper(repository: Path, command: list[str]) -> str:
+        return (
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            "caller_dir=$PWD\n"
+            "args=()\n"
+            "for arg in \"$@\"; do\n"
+            "  if [[ $arg != /* && -e $caller_dir/$arg ]]; then\n"
+            "    arg=$caller_dir/$arg\n"
+            "  fi\n"
+            "  args+=(\"$arg\")\n"
+            "done\n"
+            f"cd {shlex.quote(str(repository))}\n"
+            f"exec {shlex.join(command)} \"${{args[@]}}\"\n"
+        )
 
     @staticmethod
     def pwndbg_bridge_source() -> str:
@@ -1530,12 +1686,25 @@ except gdb.error:
             return
         self.ok("Rust stable, Cargo, rustfmt and Clippy installed with rustup")
 
-    def clone_or_update(self, name: str, url: str) -> bool:
+    def clone_or_update(self, name: str, url: str, *, update: bool = False) -> bool:
         destination = TOOLS_DIR / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
         if (destination / ".git").exists():
-            self.ok(f"{name}: already installed")
+            if update:
+                self.info(f"{name}: updating the managed checkout")
+                result = self.run(
+                    ["git", "-C", str(destination), "pull", "--ff-only"],
+                    env=env,
+                    check=False,
+                    network=True,
+                    timeout=300,
+                )
+                if result.returncode != 0:
+                    self.warn(f"{name}: update failed; using the existing checkout")
+                    self.skipped.append(f"repository update failed: {name}")
+            else:
+                self.ok(f"{name}: already installed")
             return True
         if destination.exists():
             self.failures.append(f"path exists but is not a Git repository: {destination}")
@@ -1554,10 +1723,12 @@ except gdb.error:
 
     def install_helper_repositories(self) -> None:
         for name, url in HELPER_REPOS.items():
-            if not self.clone_or_update(name, url):
+            if not self.clone_or_update(name, url, update=True):
                 continue
             if name == "glibc-all-in-one":
                 self.install_glibc_all_in_one()
+            elif name == "libc-database":
+                self.configure_libc_database_commands()
 
     def install_glibc_all_in_one(self) -> None:
         project_file = GLIBC_AIO_DIR / "pyproject.toml"
@@ -1583,39 +1754,133 @@ except gdb.error:
             )
             return
 
-        if not self.command_exists("glibc-aio"):
-            self.info("glibc-all-in-one: installing the v2 glibc-aio command")
-            install = self.run(
-                [
-                    self.system_python(), "-m", "pip", "install",
-                    "--break-system-packages", "--disable-pip-version-check",
-                    "--upgrade", "--editable", str(GLIBC_AIO_DIR),
-                ],
-                sudo=True,
-                check=False,
-                network=True,
-                timeout=300,
-                env={"PIP_ROOT_USER_ACTION": "ignore"},
-            )
-            self._extend_path()
-            if install.returncode != 0 or not self.command_exists("glibc-aio"):
-                self.failures.append("glibc-all-in-one v2 command installation failed")
-                return
-        else:
-            self.ok("glibc-aio: already installed")
+        python = self.system_python()
+        pip_base = [
+            python, "-m", "pip", "install", "--break-system-packages",
+            "--disable-pip-version-check", "--upgrade",
+        ]
+        self.info("glibc-all-in-one: ensuring the v2 Python dependencies")
+        dependencies = self.run(
+            [*pip_base, *GLIBC_AIO_DEPENDENCIES],
+            cwd=GLIBC_AIO_DIR,
+            sudo=True,
+            check=False,
+            network=True,
+            timeout=300,
+            env={"PIP_ROOT_USER_ACTION": "ignore"},
+        )
+        if dependencies.returncode != 0:
+            self.failures.append("glibc-all-in-one v2 dependency installation failed")
+            return
 
-        libc_list = GLIBC_AIO_DIR / "list"
-        if not (libc_list.exists() and libc_list.stat().st_size > 0):
+        self.info("glibc-all-in-one: installing the repository as an editable package")
+        editable = self.run(
+            [*pip_base, "--editable", "."],
+            cwd=GLIBC_AIO_DIR,
+            sudo=True,
+            check=False,
+            network=True,
+            timeout=300,
+            env={"PIP_ROOT_USER_ACTION": "ignore"},
+        )
+        if editable.returncode != 0:
+            self.failures.append("glibc-all-in-one v2 editable installation failed")
+            return
+
+        wrapper = self.repository_command_wrapper(
+            GLIBC_AIO_DIR,
+            [python, "-c", "from glibc_aio.cli.main import main; main()"],
+        )
+        if not self.install_command_wrapper(GLIBC_AIO_COMMAND, wrapper):
+            self.failures.append("glibc-all-in-one v2 command wrapper installation failed")
+            return
+        self._extend_path()
+        if not self.glibc_aio_runtime_available():
+            self.failures.append(
+                "glibc-all-in-one v2 runtime verification failed: "
+                "command or Python dependencies unavailable"
+            )
+            return
+
+        if not self.glibc_aio_index_available():
             self.info("glibc-all-in-one: updating the libc package index")
             update_list = self.run(
-                ["glibc-aio", "mirror", "update"],
-                cwd=GLIBC_AIO_DIR,
+                [str(GLIBC_AIO_COMMAND), "mirror", "update"],
+                cwd=HOME,
                 check=False,
                 network=True,
                 timeout=300,
             )
-            if update_list.returncode != 0:
+            if update_list.returncode != 0 or not self.glibc_aio_index_available():
                 self.failures.append("glibc-all-in-one libc index update failed")
+                return
+        self.ok(f"glibc-aio: configured and usable from any directory ({GLIBC_AIO_COMMAND})")
+
+    def glibc_aio_runtime_available(self) -> bool:
+        python = self.system_python()
+        imports = self.run(
+            [python, "-c", "import elftools, zstandard, glibc_aio"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if imports.returncode != 0 or not GLIBC_AIO_COMMAND.exists():
+            return False
+        version = self.run(
+            [str(GLIBC_AIO_COMMAND), "--version"],
+            cwd=HOME,
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        mirrors = self.run(
+            [str(GLIBC_AIO_COMMAND), "mirror", "list", "--json"],
+            cwd=HOME,
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        mirror_output = (mirrors.stdout or "").lower()
+        return (
+            version.returncode == 0
+            and "glibc-aio " in (version.stdout or "").lower()
+            and mirrors.returncode == 0
+            and "tuna" in mirror_output
+            and "ubuntu-archive" in mirror_output
+        )
+
+    @staticmethod
+    def glibc_aio_index_available() -> bool:
+        libc_list = GLIBC_AIO_DIR / "list"
+        try:
+            lines = libc_list.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return False
+        return any(line.strip() and line.strip() != "[old]" for line in lines)
+
+    def configure_libc_database_commands(self) -> None:
+        failures: list[str] = []
+        for command_name, script_name in LIBC_DATABASE_COMMANDS.items():
+            script = LIBC_DATABASE_DIR / script_name
+            if not script.exists():
+                failures.append(command_name)
+                continue
+            wrapper = self.repository_command_wrapper(
+                LIBC_DATABASE_DIR,
+                [str(script)],
+            )
+            destination = Path("/usr/local/bin") / command_name
+            if not self.install_command_wrapper(destination, wrapper):
+                failures.append(command_name)
+        self._extend_path()
+        missing = [name for name in LIBC_DATABASE_COMMANDS if not self.command_exists(name)]
+        failures.extend(name for name in missing if name not in failures)
+        if failures:
+            self.failures.append(
+                "libc-database command configuration failed: " + ", ".join(failures)
+            )
+            return
+        self.ok("libc-database commands configured: " + ", ".join(LIBC_DATABASE_COMMANDS))
 
     def download_installer(self, name: str, url: str) -> Path:
         parsed = urlparse(url)
@@ -1698,6 +1963,12 @@ except gdb.error:
                 return found
         return None
 
+    def find_usable_command(self, names: list[str], arguments: list[str]) -> str | None:
+        found = self.find_command(names)
+        if found and self.executable_usable(found, arguments):
+            return found
+        return None
+
     def verify(self) -> bool:
         checks = [
             ("python3", ["python3"]),
@@ -1747,15 +2018,25 @@ except gdb.error:
             ("pwndbg", ["pwndbg", "pwndbg-gdb"]),
             ("one_gadget", ["one_gadget"]),
             ("seccomp-tools", ["seccomp-tools"]),
+            ("libc-db-identify", ["libc-db-identify"]),
+            ("libc-db-find", ["libc-db-find"]),
+            ("libc-db-download", ["libc-db-download"]),
+            ("libc-db-dump", ["libc-db-dump"]),
         ]
         ok_all = True
         for label, names in checks:
             found = self.find_command(names)
-            if found:
+            probe_arguments = COMMAND_PROBE_ARGUMENTS.get(label)
+            usable = bool(found) and (
+                probe_arguments is None
+                or self.executable_usable(found, probe_arguments)
+            )
+            if found and usable:
                 self.ok(f"{label}: {found}")
             else:
                 ok_all = False
-                message = f"verification failed: {label} not found"
+                detail = "not found" if not found else "failed its launch probe"
+                message = f"verification failed: {label} {detail}"
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
@@ -1922,12 +2203,11 @@ except gdb.error:
                     self.failures.append(message)
                 self.error(message)
 
-        glibc_aio = self.find_command(["glibc-aio"])
-        if glibc_aio:
-            self.ok(f"glibc-aio: {glibc_aio}")
+        if self.glibc_aio_runtime_available() and self.glibc_aio_index_available():
+            self.ok(f"glibc-aio: {GLIBC_AIO_COMMAND} (runtime, dependencies and index ready)")
         else:
             ok_all = False
-            message = "verification failed: glibc-aio command not found"
+            message = "verification failed: glibc-aio runtime, dependencies or index unavailable"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)

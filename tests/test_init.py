@@ -101,7 +101,7 @@ class InstallerTests(unittest.TestCase):
     def test_python_install_skips_when_imports_are_present(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 0, stdout="", stderr="")
         self.bootstrap.run = mock.Mock(return_value=probe_result)
-        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
         self.bootstrap.run.assert_called_once()
 
@@ -111,7 +111,7 @@ class InstallerTests(unittest.TestCase):
         )
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
         self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
-        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
         command = self.bootstrap.run.call_args.args[0]
         self.assertIn("capstone", command)
@@ -626,45 +626,59 @@ class InstallerTests(unittest.TestCase):
 
     def test_glibc_all_in_one_v2_installs_editable_cli_and_index(self):
         with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory) / "glibc-all-in-one"
+            root = Path(directory)
+            destination = root / "glibc-all-in-one"
+            command_path = root / "bin" / "glibc-aio"
             destination.mkdir()
             (destination / "pyproject.toml").write_text(
                 "[project]\nname='glibc-aio'\n", encoding="utf-8"
             )
-            self.bootstrap.command_exists = mock.Mock(side_effect=[False, True])
-            self.bootstrap.run = mock.Mock(
-                side_effect=[
-                    subprocess.CompletedProcess(["pip", "install"], 0),
-                    subprocess.CompletedProcess(["glibc-aio", "mirror", "update"], 0),
-                ]
-            )
-            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
+            def run(command, **_kwargs):
+                if command[-2:] == ["mirror", "update"]:
+                    (destination / "list").write_text(
+                        "2.35-0ubuntu3_amd64\n", encoding="utf-8"
+                    )
+                return subprocess.CompletedProcess(command, 0)
+
+            self.bootstrap.run = mock.Mock(side_effect=run)
+            self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
+            with (
+                mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination),
+                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path),
+            ):
                 self.bootstrap.install_glibc_all_in_one()
-            install_call, index_call = self.bootstrap.run.call_args_list
-            install_command = install_call.args[0]
-            self.assertIn("--editable", install_command)
+            dependency_call, editable_call, index_call = self.bootstrap.run.call_args_list
             self.assertEqual(
-                install_command[install_command.index("--editable") + 1],
-                str(destination),
+                dependency_call.args[0][-2:], ["pyelftools", "zstandard"]
             )
-            self.assertTrue(install_call.kwargs["sudo"])
+            self.assertEqual(editable_call.args[0][-2:], ["--editable", "."])
+            self.assertEqual(editable_call.kwargs["cwd"], destination)
+            self.assertTrue(dependency_call.kwargs["sudo"])
+            self.assertTrue(editable_call.kwargs["sudo"])
             self.assertEqual(
-                index_call.args[0], ["glibc-aio", "mirror", "update"]
+                index_call.args[0], [str(command_path), "mirror", "update"]
             )
-            self.assertEqual(index_call.kwargs["cwd"], destination)
+            self.bootstrap.install_command_wrapper.assert_called_once()
             self.assertEqual(self.bootstrap.failures, [])
 
-    def test_glibc_all_in_one_v2_skips_work_when_ready(self):
+    def test_glibc_all_in_one_v2_repairs_package_even_when_index_is_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "glibc-all-in-one"
             destination.mkdir()
             (destination / "pyproject.toml").touch()
             (destination / "list").write_text("libc6 example\n", encoding="utf-8")
-            self.bootstrap.command_exists = mock.Mock(return_value=True)
-            self.bootstrap.run = mock.Mock()
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["pip"], 0)
+            )
+            self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
             with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
                 self.bootstrap.install_glibc_all_in_one()
-            self.bootstrap.run.assert_not_called()
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(commands[0][-2:], ["pyelftools", "zstandard"])
+            self.assertEqual(commands[1][-2:], ["--editable", "."])
             self.assertEqual(self.bootstrap.failures, [])
 
     def test_glibc_legacy_checkout_is_fast_forwarded_to_v2(self):
@@ -675,10 +689,14 @@ class InstallerTests(unittest.TestCase):
             def run(command, **_kwargs):
                 if command[:3] == ["git", "-C", str(destination)]:
                     (destination / "pyproject.toml").touch()
+                    (destination / "list").write_text(
+                        "2.35-0ubuntu3_amd64\n", encoding="utf-8"
+                    )
                 return subprocess.CompletedProcess(command, 0)
 
-            self.bootstrap.command_exists = mock.Mock(side_effect=[False, True])
             self.bootstrap.run = mock.Mock(side_effect=run)
+            self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
             with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
                 self.bootstrap.install_glibc_all_in_one()
             commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
@@ -691,6 +709,80 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertTrue(any("--editable" in command for command in commands))
             self.assertEqual(self.bootstrap.failures, [])
+
+    def test_repository_wrapper_uses_managed_data_and_preserves_relative_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository = root / "managed repo"
+            caller = root / "caller"
+            repository.mkdir()
+            caller.mkdir()
+            sample = caller / "libc.so.6"
+            sample.touch()
+            wrapper = root / "wrapper"
+            wrapper.write_text(
+                self.bootstrap.repository_command_wrapper(
+                    repository,
+                    [
+                        "python3", "-c",
+                        "import os, sys; print(os.getcwd()); print(sys.argv[1])",
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o755)
+
+            result = subprocess.run(
+                [str(wrapper), sample.name],
+                cwd=caller,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                result.stdout.splitlines(), [str(repository), str(sample)]
+            )
+
+    def test_libc_database_installs_direct_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "libc-database"
+            destination.mkdir()
+            for script_name in MODULE.LIBC_DATABASE_COMMANDS.values():
+                (destination / script_name).touch()
+            self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+            self.bootstrap.command_exists = mock.Mock(return_value=True)
+            with mock.patch.object(MODULE, "LIBC_DATABASE_DIR", destination):
+                self.bootstrap.configure_libc_database_commands()
+
+            destinations = {
+                call.args[0] for call in self.bootstrap.install_command_wrapper.call_args_list
+            }
+            self.assertEqual(
+                destinations,
+                {
+                    Path("/usr/local/bin") / name
+                    for name in MODULE.LIBC_DATABASE_COMMANDS
+                },
+            )
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_launch_probe_rejects_broken_python_entrypoints(self):
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["tool", "--help"],
+                1,
+                stdout="",
+                stderr="Traceback (most recent call last): ModuleNotFoundError",
+            )
+        )
+        self.assertFalse(self.bootstrap.executable_usable("tool", ["--help"]))
+
+        self.bootstrap.run.return_value = subprocess.CompletedProcess(
+            ["tool"], 2, stdout="", stderr="Usage: tool arguments"
+        )
+        self.assertTrue(self.bootstrap.executable_usable("tool", []))
 
     def test_ctf_toolchain_configures_bridge_after_pwndbg(self):
         names = [

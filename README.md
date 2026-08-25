@@ -1,4 +1,4 @@
-# init v3.14
+# init v3.15
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -26,6 +26,7 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
 - r2pipe 固定安装到 `~/.local/share/pwndbg-python`，专供便携版 Pwndbg 使用，不污染系统 Python。
 - 自动生成 Pwndbg 的 `ghidra` 快捷命令，并以托管区块安全写入 `~/.gdbinit`。
+- 对主要命令执行实际启动探测，不再把“文件存在”误判成“工具可用”；Python/Ruby 命令损坏时会重新安装。
 - 脚本主动克隆的源码和 CTF 数据库统一放在 `~/tools`，包管理器自己的标准目录不强行迁移。
 
 全新安装通常占用约 10–14 GiB（不含以后下载的 Docker 镜像），建议预留 18 GiB。
@@ -223,22 +224,34 @@ pwndbg> r2pipe pdg?
 | `~/tools/glibc-all-in-one` | glibc-all-in-one v2、libc 包索引和以后下载的 `libs/` | 只更新小型索引 |
 | `~/tools/libc-database` | libc 指纹识别和偏移查询脚本；以后下载的数据仍保存在该目录 | 默认不下载全部 libc |
 
-`glibc-all-in-one` 新版不再只是几段 shell 脚本。安装器会从 `~/tools/glibc-all-in-one` 以 editable 方式安装 `glibc-aio` 命令，并执行一次索引更新：
+`glibc-all-in-one` 新版不再只是几段 shell 脚本。脚本会先更新托管仓库，再按上游 v2 的方式显式安装依赖和 editable 包：
 
 ```bash
+cd ~/tools/glibc-all-in-one
+python3 -m pip install --upgrade pyelftools zstandard
+python3 -m pip install --editable .
+```
+
+随后生成 `/usr/local/bin/glibc-aio` 稳定包装命令，验证 Python 模块、`--version`、镜像列表和本地包索引。上游 v2 的 `list`、`libs/` 使用相对工作目录；包装命令会自动切换到仓库目录，同时把调用位置中真实存在的相对文件转换为绝对路径，因此可以直接在任意目录运行：
+
+```bash
+glibc-aio --version
+glibc-aio mirror list
 glibc-aio puts 0x80970 system 0x4f440
 glibc-aio download 2.27-3ubuntu1_amd64
 glibc-aio ./libc.so.6
 ```
 
-`libc-database` 保持仓库原生用法：
+`libc-database` 也会更新托管仓库，并配置四个可从任意目录使用的包装命令：
 
 ```bash
-cd ~/tools/libc-database
-./identify /path/to/libc.so.6
-./find puts 809c0
-./download id
+libc-db-identify ./libc.so.6
+libc-db-find puts 809c0
+libc-db-download id
+libc-db-dump id
 ```
+
+原仓库脚本仍保留在 `~/tools/libc-database`，没有默认下载全部 libc 数据。
 
 以下目录由对应工具自己管理，故意不塞进 `~/tools`，否则容易破坏升级和插件发现：
 
@@ -249,6 +262,7 @@ cd ~/tools/libc-database
 | `~/.local/share/pwndbg-python` | 专供便携版 Pwndbg 导入的 r2pipe |
 | `~/.local/share/init/gdb`、`~/.gdbinit` 托管区块 | `ghidra` 快捷命令桥接配置 |
 | `~/.cargo`、`~/.rustup` | Cargo 命令、Rust stable 工具链及 rustup 元数据 |
+| `/usr/local/bin/glibc-aio`、`/usr/local/bin/libc-db-*` | 数据库工具的稳定全局包装命令 |
 | `/var/lib/docker` | Docker 镜像、容器和卷 |
 
 SecLists 当前不在默认安装内容中。完整版包含密码、目录、DNS、Fuzzing、Payload 和 WebShell 等大量列表，约 4.5GB，更偏 Web 渗透/SRC，而且在服务器上可能触发安全软件告警；直接加入会明显抬高初始化空间。需要时仍建议统一放进 `~/tools`：
