@@ -388,6 +388,105 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_r2ghidra()
         self.assertIn("matching versions", self.bootstrap.failures[0])
 
+    def test_r2pipe_install_uses_fixed_user_directory_without_sudo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "pwndbg-python"
+            self.bootstrap.r2pipe_target_available = mock.Mock(side_effect=[False, True])
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
+            )
+            with mock.patch.object(MODULE, "PWNDBG_PYTHON_DIR", target):
+                self.assertTrue(self.bootstrap.install_r2pipe_for_pwndbg())
+            call = self.bootstrap.run.call_args
+            command = call.args[0]
+            self.assertIn("--target", command)
+            self.assertEqual(command[command.index("--target") + 1], str(target))
+            self.assertIn(f"r2pipe=={MODULE.R2PIPE_VERSION}", command)
+            self.assertIn("--no-deps", command)
+            self.assertNotIn("sudo", command)
+            self.assertNotIn("sudo", call.kwargs)
+
+    def test_r2pipe_install_skips_when_exact_version_is_available(self):
+        self.bootstrap.r2pipe_target_available = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock()
+        self.assertTrue(self.bootstrap.install_r2pipe_for_pwndbg())
+        self.bootstrap.run.assert_not_called()
+
+    def test_pwndbg_bridge_configuration_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "pwndbg-python"
+            script = root / "share" / "r2ghidra.py"
+            gdbinit = root / ".gdbinit"
+            gdbinit.write_text("set pagination off\n", encoding="utf-8")
+            with (
+                mock.patch.object(MODULE, "PWNDBG_PYTHON_DIR", target),
+                mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", script),
+                mock.patch.object(MODULE, "GDBINIT", gdbinit),
+            ):
+                self.assertTrue(self.bootstrap.configure_pwndbg_r2ghidra())
+                first = gdbinit.read_text(encoding="utf-8")
+                self.assertTrue(self.bootstrap.configure_pwndbg_r2ghidra())
+                second = gdbinit.read_text(encoding="utf-8")
+            self.assertEqual(first, second)
+            self.assertIn("set pagination off", second)
+            self.assertEqual(second.count(MODULE.GDBINIT_BEGIN), 1)
+            self.assertEqual(second.count(MODULE.GDBINIT_END), 1)
+            bridge = script.read_text(encoding="utf-8")
+            self.assertIn(str(target), bridge)
+            self.assertIn('super().__init__("ghidra"', bridge)
+            self.assertIn('gdb.execute(f"r2pipe pdg @', bridge)
+
+    def test_pwndbg_bridge_install_verifies_after_configuration(self):
+        self.bootstrap.install_r2pipe_for_pwndbg = mock.Mock(return_value=True)
+        self.bootstrap.configure_pwndbg_r2ghidra = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_r2ghidra_available = mock.Mock(return_value=True)
+        self.bootstrap.install_pwndbg_r2ghidra_bridge()
+        self.bootstrap.install_r2pipe_for_pwndbg.assert_called_once_with()
+        self.bootstrap.configure_pwndbg_r2ghidra.assert_called_once_with()
+        self.bootstrap.pwndbg_r2ghidra_available.assert_called_once_with()
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_pwndbg_integration_probe_checks_import_command_and_decompiler(self):
+        self.bootstrap.find_command = mock.Mock(return_value="/usr/local/bin/pwndbg")
+        self.bootstrap.r2pipe_target_available = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["pwndbg"],
+                0,
+                stdout=(
+                    "/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
+                    "Decompile an address with Pwndbg, radare2 and r2ghidra.\n"
+                    "Native Ghidra decompiler plugin\n"
+                ),
+                stderr="",
+            )
+        )
+        self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("pi import r2pipe; print(r2pipe.__file__)", command)
+        self.assertIn("help ghidra", command)
+        self.assertIn("r2pipe pdg?", command)
+
+    def test_ctf_toolchain_configures_bridge_after_pwndbg(self):
+        names = [
+            "install_python2_legacy", "install_python_tools", "install_ruby_tools",
+            "install_radare2", "install_r2ghidra", "install_remote_tool",
+            "install_pwndbg_r2ghidra_bridge", "install_helper_repositories",
+        ]
+        calls = []
+        for name in names:
+            result = True if name == "install_radare2" else None
+            setattr(
+                self.bootstrap,
+                name,
+                mock.Mock(side_effect=lambda *args, _name=name, **kwargs: calls.append(_name),
+                          return_value=result),
+            )
+        self.bootstrap.install_ctf_toolchain()
+        self.assertLess(calls.index("install_remote_tool"), calls.index("install_pwndbg_r2ghidra_bridge"))
+        self.assertLess(calls.index("install_pwndbg_r2ghidra_bridge"), calls.index("install_helper_repositories"))
+
 
 if __name__ == "__main__":
     unittest.main()

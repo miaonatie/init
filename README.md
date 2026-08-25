@@ -1,4 +1,4 @@
-# init v3.10
+# init v3.11
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -22,6 +22,8 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
+- r2pipe 固定安装到 `~/.local/share/pwndbg-python`，专供便携版 Pwndbg 使用，不污染系统 Python。
+- 自动生成 Pwndbg 的 `ghidra` 快捷命令，并以托管区块安全写入 `~/.gdbinit`。
 
 全新安装通常占用约 8–12 GiB（不含以后下载的 Docker 镜像），建议预留 15 GiB。
 脚本会按缺失内容动态检查空间：完整安装至少 10 GiB，少量补装至少 3 GiB，纯复查至少 1 GiB。
@@ -78,6 +80,41 @@ q            退出
 ```
 
 当前位置还未识别成函数时，先执行 `af`，再执行 `pdg`；分析不完整可执行 `aaa` 后重试。
+
+## 在 Pwndbg 中直接反编译
+
+新版会解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`：
+
+- 将固定版本的 r2pipe 安装到 `~/.local/share/pwndbg-python`；
+- 生成 `~/.local/share/init/gdb/r2ghidra.py`；
+- 在 `~/.gdbinit` 中只维护一段带起止标记的配置，不改动其他个人设置；
+- 安装完成后用 Pwndbg 批处理模式实际验证 r2pipe、快捷命令和 `pdg`。
+
+Ubuntu、Kali、原生 Linux、WSL 和 Linux 虚拟机的用法相同：
+
+```bash
+pwndbg ./chall
+```
+
+进入 Pwndbg 后：
+
+```text
+start                 启动并停在程序入口附近
+ghidra                反编译当前 $pc 所在地址
+ghidra &main          反编译 main
+ghidra 0x4011d6       反编译指定地址
+r2pipe pdg @ main     直接执行原始 r2pipe/r2ghidra 命令
+```
+
+排错时依次检查：
+
+```text
+pwndbg> pi import r2pipe; print(r2pipe.__file__)
+pwndbg> help ghidra
+pwndbg> r2pipe pdg?
+```
+
+第一条应显示 `~/.local/share/pwndbg-python` 下的路径，第二条应显示快捷命令帮助，第三条应包含 `Native Ghidra decompiler plugin`。`ctx-ghidra` 不是 Pwndbg 官方命令，也不是本项目配置的命令；这里统一使用 `ghidra`。
 
 ## 更新
 
