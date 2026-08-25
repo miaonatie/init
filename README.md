@@ -1,4 +1,4 @@
-# init v3.15
+# init v3.16
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -18,14 +18,14 @@ python3 init.py
 APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢整批安装；十六进制查看统一使用 `xxd`。
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
-- Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令，不会改变系统 `python`。
+- Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令；检测到 Debian/Kali 禁用系统 Python 2 的 ensurepip 时会直接切换到 pyenv，不再做无效重试。
 - Node.js 通过 `~/tools/nvm` 管理，安装当前 LTS、npm、Corepack、pnpm 和 Yarn，同时配置 Bash/Zsh。
 - Rust 通过官方 rustup 安装 stable、Cargo、rustfmt 和 Clippy，同时配置 Bash/Zsh。
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
 - r2pipe 固定安装到 `~/.local/share/pwndbg-python`，专供便携版 Pwndbg 使用，不污染系统 Python。
-- 自动生成 Pwndbg 的 `ghidra` 快捷命令，并以托管区块安全写入 `~/.gdbinit`。
+- 自动生成 Pwndbg 的 `ghidra` 快捷命令和 `pwndbg-ctf` 启动器；Bash/Zsh 中的 `pwndbg` 会显式加载桥接脚本，兼容使用 `-nx` 的新版便携版 Pwndbg。
 - 对主要命令执行实际启动探测，不再把“文件存在”误判成“工具可用”；Python/Ruby 命令损坏时会重新安装。
 - 脚本主动克隆的源码和 CTF 数据库统一放在 `~/tools`，包管理器自己的标准目录不强行迁移。
 
@@ -55,6 +55,8 @@ Go、PHP、Lua 和 .NET 当前不默认安装：需要时可单独安装或使�
 ### Node.js、pnpm 与 Yarn
 
 Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；Node 本身始终安装当前 LTS，不把具体大版本写死。Corepack 会先更新到最新版，再启用并准备最新版 pnpm 和稳定版 Yarn：
+
+脚本会先创建自定义的 `~/tools/nvm`。这一步不能省略：NVM 安装器在预设的 `NVM_DIR` 不存在时会直接退出。
 
 ```bash
 nvm --version
@@ -179,16 +181,20 @@ q            退出
 
 ## 在 Pwndbg 中直接反编译
 
-新版会解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`：
+新版会同时解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`，以及便携版启动器使用 `-nx`、不会读取 `~/.gdbinit` 的问题：
 
 - 将固定版本的 r2pipe 安装到 `~/.local/share/pwndbg-python`；
 - 生成 `~/.local/share/init/gdb/r2ghidra.py`；
-- 在 `~/.gdbinit` 中只维护一段带起止标记的配置，不改动其他个人设置；
+- 安装 `/usr/local/bin/pwndbg-ctf`，用 `-x` 显式加载桥接脚本；
+- 在 Bash/Zsh 配置中添加托管的 `pwndbg` 函数，使日常的 `pwndbg ./chall` 自动走上述启动器；
+- `~/.gdbinit` 仍保留一段带起止标记的配置，供普通系统 GDB 使用，不改动其他个人设置；
 - 安装完成后用 Pwndbg 批处理模式实际验证 r2pipe、快捷命令和 `pdg`。
 
 Ubuntu、Kali、原生 Linux、WSL 和 Linux 虚拟机的用法相同：
 
 ```bash
+source ~/.zshrc             # Bash 用户改为 source ~/.bashrc
+type pwndbg                 # 应显示 pwndbg 是 shell function
 pwndbg ./chall
 ```
 
@@ -204,10 +210,11 @@ r2pipe pdg @ main     直接执行原始 r2pipe/r2ghidra 命令
 
 排错时依次检查：
 
-```text
-pwndbg> pi import r2pipe; print(r2pipe.__file__)
-pwndbg> help ghidra
-pwndbg> r2pipe pdg?
+```bash
+pwndbg-ctf -q --batch /bin/true \
+  -ex 'pi import r2pipe; print(r2pipe.__file__)' \
+  -ex 'help ghidra' \
+  -ex 'r2pipe pdg?'
 ```
 
 第一条应显示 `~/.local/share/pwndbg-python` 下的路径，第二条应显示快捷命令帮助，第三条应包含 `Native Ghidra decompiler plugin`。`ctx-ghidra` 不是 Pwndbg 官方命令，也不是本项目配置的命令；这里统一使用 `ghidra`。
@@ -261,6 +268,7 @@ libc-db-dump id
 | `~/.local/share/radare2/r2pm`、radare2 用户插件目录 | r2pm 与 r2ghidra |
 | `~/.local/share/pwndbg-python` | 专供便携版 Pwndbg 导入的 r2pipe |
 | `~/.local/share/init/gdb`、`~/.gdbinit` 托管区块 | `ghidra` 快捷命令桥接配置 |
+| `/usr/local/bin/pwndbg-ctf`、Bash/Zsh 托管区块 | 显式加载桥接脚本的便携版 Pwndbg 启动入口 |
 | `~/.cargo`、`~/.rustup` | Cargo 命令、Rust stable 工具链及 rustup 元数据 |
 | `/usr/local/bin/glibc-aio`、`/usr/local/bin/libc-db-*` | 数据库工具的稳定全局包装命令 |
 | `/var/lib/docker` | Docker 镜像、容器和卷 |

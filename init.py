@@ -158,9 +158,12 @@ R2PIPE_VERSION = "1.9.8"
 PWNDBG_PYTHON_DIR = HOME / ".local" / "share" / "pwndbg-python"
 PWNDBG_BRIDGE_DIR = HOME / ".local" / "share" / "init" / "gdb"
 PWNDBG_BRIDGE_SCRIPT = PWNDBG_BRIDGE_DIR / "r2ghidra.py"
+PWNDBG_CTF_COMMAND = Path("/usr/local/bin/pwndbg-ctf")
 GDBINIT = HOME / ".gdbinit"
 GDBINIT_BEGIN = "# >>> init r2ghidra bridge >>>"
 GDBINIT_END = "# <<< init r2ghidra bridge <<<"
+PWNDBG_PROFILE_BEGIN = "# >>> init pwndbg bridge >>>"
+PWNDBG_PROFILE_END = "# <<< init pwndbg bridge <<<"
 
 DOCKER_PACKAGES = [
     "docker-ce", "docker-ce-cli", "containerd.io",
@@ -894,13 +897,24 @@ class Bootstrap:
     def install_python2_legacy(self) -> None:
         existing = self.existing_python2()
         if existing is not None:
-            if self.configure_python2_runtime(existing):
+            resolved = existing.resolve()
+            system_runtime_without_pip = (
+                resolved.is_relative_to(Path("/usr"))
+                and not self.python2_pip_ready(resolved)
+            )
+            if system_runtime_without_pip:
+                self.warn(
+                    f"system Python 2 at {resolved} has no pip; Debian/Kali disables "
+                    "ensurepip, so the isolated pyenv runtime will be used directly"
+                )
+            elif self.configure_python2_runtime(existing):
                 self.ok(f"Python 2 legacy runtime and pip2: already configured ({existing})")
                 return
-            self.warn(
-                f"existing Python 2 at {existing} has no usable pip; "
-                "installing the isolated pyenv runtime"
-            )
+            else:
+                self.warn(
+                    f"existing Python 2 at {existing} has no usable pip; "
+                    "installing the isolated pyenv runtime"
+                )
         if not self.clone_or_update("pyenv", PYENV_URL):
             self.failures.append("Python 2 legacy runtime installation failed")
             return
@@ -1407,13 +1421,63 @@ except gdb.error:
             return False
         return True
 
-    def pwndbg_r2ghidra_available(self) -> bool:
-        pwndbg = self.find_command(["pwndbg", "pwndbg-gdb"])
-        if pwndbg is None or not self.r2pipe_target_available():
+    @staticmethod
+    def pwndbg_launcher_source(backend: str) -> str:
+        return (
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f"exec {shlex.quote(backend)} -x "
+            f"{shlex.quote(str(PWNDBG_BRIDGE_SCRIPT))} \"$@\"\n"
+        )
+
+    def configure_pwndbg_launcher(self) -> bool:
+        backend = self.find_command(["pwndbg", "pwndbg-gdb"])
+        if backend is None:
+            self.failures.append("Pwndbg bridge launcher failed: Pwndbg executable not found")
             return False
-        result = self.run(
+        if not self.install_command_wrapper(
+            PWNDBG_CTF_COMMAND,
+            self.pwndbg_launcher_source(backend),
+        ):
+            self.failures.append("Pwndbg bridge launcher installation failed")
+            return False
+
+        shell_body = (
+            "unalias pwndbg 2>/dev/null || true\n"
+            "pwndbg() {\n"
+            f"  {shlex.quote(str(PWNDBG_CTF_COMMAND))} \"$@\"\n"
+            "}"
+        )
+        try:
+            for profile in (BASHRC, ZSHRC):
+                self.update_managed_block(
+                    profile,
+                    PWNDBG_PROFILE_BEGIN,
+                    PWNDBG_PROFILE_END,
+                    shell_body,
+                )
+        except OSError as exc:
+            self.failures.append(f"Pwndbg shell launcher configuration failed: {exc}")
+            return False
+        return True
+
+    def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
+        if not self.r2pipe_target_available():
+            return subprocess.CompletedProcess(
+                [str(PWNDBG_CTF_COMMAND)], 1, "", "isolated r2pipe unavailable"
+            )
+        if PWNDBG_CTF_COMMAND.exists():
+            command = [str(PWNDBG_CTF_COMMAND)]
+        else:
+            backend = self.find_command(["pwndbg", "pwndbg-gdb"])
+            if backend is None:
+                return subprocess.CompletedProcess(
+                    ["pwndbg"], 127, "", "Pwndbg executable not found"
+                )
+            command = [backend, "-x", str(PWNDBG_BRIDGE_SCRIPT)]
+        return self.run(
             [
-                pwndbg, "-q", "--batch",
+                *command, "-q", "--batch",
                 "-ex", "pi import r2pipe; print(r2pipe.__file__)",
                 "-ex", "help ghidra",
                 "-ex", "r2pipe pdg?",
@@ -1423,6 +1487,9 @@ except gdb.error:
             capture=True,
             timeout=90,
         )
+
+    def pwndbg_r2ghidra_available(self) -> bool:
+        result = self.pwndbg_r2ghidra_probe()
         output = ((result.stdout or "") + (result.stderr or "")).lower()
         return (
             result.returncode == 0
@@ -1436,12 +1503,29 @@ except gdb.error:
             return
         if not self.configure_pwndbg_r2ghidra():
             return
-        if self.pwndbg_r2ghidra_available():
-            self.ok("Pwndbg r2ghidra bridge and ghidra command configured")
+        if not self.configure_pwndbg_launcher():
+            return
+        probe = self.pwndbg_r2ghidra_probe()
+        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
+        if (
+            probe.returncode == 0
+            and "could not import r2pipe" not in output
+            and "decompile an address with pwndbg" in output
+            and "native ghidra decompiler" in output
+        ):
+            self.ok(
+                "Pwndbg portable r2ghidra bridge configured; "
+                "pwndbg-ctf and shell pwndbg command are ready"
+            )
         else:
+            details = [
+                line.strip()
+                for line in ((probe.stderr or "") + "\n" + (probe.stdout or "")).splitlines()
+                if line.strip()
+            ]
+            suffix = f": {details[-1][:240]}" if details else ""
             self.failures.append(
-                "Pwndbg r2ghidra bridge verification failed; run "
-                "'pwndbg /bin/true' and check 'pi import r2pipe'"
+                "Pwndbg r2ghidra bridge verification failed" + suffix
             )
 
     def nvm_version(self) -> str | None:
@@ -1468,6 +1552,7 @@ except gdb.error:
             return True
         installer: Path | None = None
         try:
+            NVM_DIR.mkdir(parents=True, exist_ok=True)
             self.info(f"installing nvm {NVM_VERSION} into {NVM_DIR}")
             installer = self.download_installer("nvm", NVM_URL)
             result = self.run(

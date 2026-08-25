@@ -121,11 +121,24 @@ class InstallerTests(unittest.TestCase):
     def test_python2_existing_runtime_is_not_reinstalled(self):
         python2 = Path("/usr/bin/python2")
         self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
+        self.bootstrap.python2_pip_ready = mock.Mock(return_value=True)
         self.bootstrap.configure_python2_runtime = mock.Mock(return_value=True)
         self.bootstrap.clone_or_update = mock.Mock()
         self.bootstrap.install_python2_legacy()
         self.bootstrap.configure_python2_runtime.assert_called_once_with(python2)
         self.bootstrap.clone_or_update.assert_not_called()
+
+    def test_system_python2_without_pip_skips_disabled_ensurepip(self):
+        python2 = Path("/usr/bin/python2")
+        self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
+        self.bootstrap.python2_pip_ready = mock.Mock(return_value=False)
+        self.bootstrap.configure_python2_runtime = mock.Mock()
+        self.bootstrap.clone_or_update = mock.Mock(return_value=False)
+
+        self.bootstrap.install_python2_legacy()
+
+        self.bootstrap.configure_python2_runtime.assert_not_called()
+        self.bootstrap.clone_or_update.assert_called_once_with("pyenv", MODULE.PYENV_URL)
 
     def test_python2_pyenv_install_never_changes_global_python(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -409,6 +422,25 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(call.kwargs["timeout"], 900)
         self.assertEqual(self.bootstrap.failures, [])
 
+    def test_nvm_installer_creates_custom_directory_before_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            nvm_dir = root / "tools" / "nvm"
+            installer = root / "install-nvm.sh"
+            installer.touch()
+            self.bootstrap.nvm_version = mock.Mock(side_effect=[None, MODULE.NVM_VERSION])
+            self.bootstrap.download_installer = mock.Mock(return_value=installer)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["bash"], 0)
+            )
+            with mock.patch.object(MODULE, "NVM_DIR", nvm_dir):
+                self.assertTrue(self.bootstrap.install_nvm())
+
+            self.assertTrue(nvm_dir.is_dir())
+            call = self.bootstrap.run.call_args
+            self.assertEqual(call.kwargs["env"]["NVM_DIR"], str(nvm_dir))
+            self.assertEqual(call.kwargs["env"]["PROFILE"], "/dev/null")
+
     def test_existing_rustup_updates_stable_and_standard_components(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -596,12 +628,53 @@ class InstallerTests(unittest.TestCase):
     def test_pwndbg_bridge_install_verifies_after_configuration(self):
         self.bootstrap.install_r2pipe_for_pwndbg = mock.Mock(return_value=True)
         self.bootstrap.configure_pwndbg_r2ghidra = mock.Mock(return_value=True)
-        self.bootstrap.pwndbg_r2ghidra_available = mock.Mock(return_value=True)
+        self.bootstrap.configure_pwndbg_launcher = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["pwndbg-ctf"],
+                0,
+                stdout=(
+                    "Decompile an address with Pwndbg\n"
+                    "Native Ghidra decompiler plugin\n"
+                ),
+                stderr="",
+            )
+        )
         self.bootstrap.install_pwndbg_r2ghidra_bridge()
         self.bootstrap.install_r2pipe_for_pwndbg.assert_called_once_with()
         self.bootstrap.configure_pwndbg_r2ghidra.assert_called_once_with()
-        self.bootstrap.pwndbg_r2ghidra_available.assert_called_once_with()
+        self.bootstrap.configure_pwndbg_launcher.assert_called_once_with()
+        self.bootstrap.pwndbg_r2ghidra_probe.assert_called_once_with()
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_pwndbg_portable_launcher_is_idempotent_for_bash_and_zsh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bashrc = root / ".bashrc"
+            zshrc = root / ".zshrc"
+            launcher = root / "bin" / "pwndbg-ctf"
+            bridge = root / "r2ghidra.py"
+            backend = "/usr/local/bin/pwndbg"
+            self.bootstrap.find_command = mock.Mock(return_value=backend)
+            self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+            with (
+                mock.patch.object(MODULE, "BASHRC", bashrc),
+                mock.patch.object(MODULE, "ZSHRC", zshrc),
+                mock.patch.object(MODULE, "PWNDBG_CTF_COMMAND", launcher),
+                mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", bridge),
+            ):
+                self.assertTrue(self.bootstrap.configure_pwndbg_launcher())
+                self.assertTrue(self.bootstrap.configure_pwndbg_launcher())
+
+            source = self.bootstrap.install_command_wrapper.call_args.args[1]
+            self.assertIn(backend, source)
+            self.assertIn(f"-x {bridge}", source)
+            for profile in (bashrc, zshrc):
+                text = profile.read_text(encoding="utf-8")
+                self.assertEqual(text.count(MODULE.PWNDBG_PROFILE_BEGIN), 1)
+                self.assertEqual(text.count(MODULE.PWNDBG_PROFILE_END), 1)
+                self.assertIn("pwndbg()", text)
+                self.assertIn(str(launcher), text)
 
     def test_pwndbg_integration_probe_checks_import_command_and_decompiler(self):
         self.bootstrap.find_command = mock.Mock(return_value="/usr/local/bin/pwndbg")
@@ -618,8 +691,13 @@ class InstallerTests(unittest.TestCase):
                 stderr="",
             )
         )
-        self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
+        with mock.patch.object(
+            MODULE, "PWNDBG_CTF_COMMAND", Path("/nonexistent/pwndbg-ctf")
+        ):
+            self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
         command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("-x", command)
+        self.assertIn(str(MODULE.PWNDBG_BRIDGE_SCRIPT), command)
         self.assertIn("pi import r2pipe; print(r2pipe.__file__)", command)
         self.assertIn("help ghidra", command)
         self.assertIn("r2pipe pdg?", command)
