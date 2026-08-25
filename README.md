@@ -1,4 +1,4 @@
-# init v3.12
+# init v3.13
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -18,7 +18,7 @@ python3 init.py
 APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢整批安装；十六进制查看统一使用 `xxd`。
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
-- Python 2.7 通过 pyenv 隔离安装，仅提供 `python2` / `pip2`，不会改变系统 `python`。
+- Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令，不会改变系统 `python`。
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
@@ -28,6 +28,48 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 
 全新安装通常占用约 8–12 GiB（不含以后下载的 Docker 镜像），建议预留 15 GiB。
 脚本会按缺失内容动态检查空间：完整安装至少 10 GiB，少量补装至少 3 GiB，纯复查至少 1 GiB。
+
+## 语言与构建环境
+
+默认配置的是 CTF、Pwn、逆向和 Misc 常用语言环境，不额外安装与此用途关系较小的大型 SDK：
+
+| 类别 | 已配置内容 | 主要用途 |
+| --- | --- | --- |
+| C/C++ | GCC、G++、Clang、LLVM、LLD、GNU ld、32 位 multilib | 编译题目、Exploit 辅助程序和逆向工具 |
+| 汇编 | NASM、YASM、GNU binutils | x86/x86-64 汇编、链接、反汇编 |
+| Python 3 | 系统 Python 3、pip、IPython、pwntools 等 CTF 库 | 当前脚本和主力 CTF 开发环境 |
+| Python 2 | `~/tools/pyenv` 中的 2.7.18、`python2`、`pip2` | 仅运行旧 EXP、旧题目脚本 |
+| Ruby | Ruby、RubyGems、Bundler、one_gadget、seccomp-tools、zsteg | Pwn 和 Misc 工具 |
+| Java | 默认 JDK、JRE、`java`、`javac` | APK/Java 逆向及需要 JVM 的工具 |
+| Perl | Perl | libc-database、系统脚本和文本处理 |
+| Shell | Bash、Zsh、ShellCheck、bash-completion | 自动化脚本和日常终端环境 |
+| 构建系统 | make、Autoconf、Automake、Libtool、CMake、Ninja、Meson | 编译 radare2、r2ghidra 和其他源码工具 |
+
+Go、Rust、Node.js、PHP、Lua 和 .NET 当前不默认安装：它们不是这套 Pwn/逆向初始化的必需依赖，默认加入会增加空间和升级维护成本，需要时可单独安装或使用 Docker。
+
+### Python 2 与 pip2
+
+`pip2` 是一个稳定包装命令，内部始终调用同一套 Python 2：
+
+```text
+/usr/local/bin/python2  -> 检测到的 Python 2.7（默认是 ~/tools/pyenv/.../python2.7）
+/usr/local/bin/pip2     -> 同一个 Python 2.7 执行 -m pip
+```
+
+这样即使 pyenv 只生成 `pip`、没有生成名为 `pip2` 的可执行文件，也不会再出现 `command not found`。检查：
+
+```bash
+python2 --version
+python2 -m pip --version
+pip2 --version
+```
+
+Python 2 已停止维护，很多新软件包不再兼容，安装旧 EXP 依赖时通常需要锁定旧版本，例如：
+
+```bash
+pip2 install 'requests<2.28'
+python2 old_exp.py
+```
 
 
 ## radare2 与 r2ghidra 安装

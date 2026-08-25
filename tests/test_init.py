@@ -119,9 +119,12 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("ropper", command)
 
     def test_python2_existing_runtime_is_not_reinstalled(self):
-        self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))
+        python2 = Path("/usr/bin/python2")
+        self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
+        self.bootstrap.configure_python2_runtime = mock.Mock(return_value=True)
         self.bootstrap.clone_or_update = mock.Mock()
         self.bootstrap.install_python2_legacy()
+        self.bootstrap.configure_python2_runtime.assert_called_once_with(python2)
         self.bootstrap.clone_or_update.assert_not_called()
 
     def test_python2_pyenv_install_never_changes_global_python(self):
@@ -136,6 +139,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.existing_python2 = mock.Mock(return_value=None)
             self.bootstrap.clone_or_update = mock.Mock(return_value=True)
             self.bootstrap.valid_python2 = mock.Mock(return_value=True)
+            self.bootstrap.configure_python2_runtime = mock.Mock(return_value=True)
             self.bootstrap.run = mock.Mock(
                 return_value=subprocess.CompletedProcess(["command"], 0, stdout="", stderr="")
             )
@@ -144,6 +148,59 @@ class InstallerTests(unittest.TestCase):
             commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
             self.assertTrue(any(command[1:3] == ["install", "-s"] for command in commands))
             self.assertFalse(any("global" in command for command in commands))
+
+    def test_python2_runtime_creates_pip2_wrapper_from_pip_module(self):
+        with tempfile.TemporaryDirectory() as directory:
+            python2 = Path(directory) / "python2.7"
+            python2.touch()
+            wrapper_content = []
+
+            def run(command, **_kwargs):
+                if command[0] == "install":
+                    wrapper_content.append(Path(command[3]).read_text(encoding="utf-8"))
+                stdout = "pip 20.3.4 from test (python 2.7)\n"
+                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+            self.bootstrap.run = mock.Mock(side_effect=run)
+            self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertIn(
+                ["ln", "-sf", str(python2.resolve()), "/usr/local/bin/python2"],
+                commands,
+            )
+            self.assertTrue(
+                any(command[0:3] == ["install", "-m", "0755"] for command in commands)
+            )
+            self.assertEqual(len(wrapper_content), 1)
+            self.assertIn(str(python2.resolve()), wrapper_content[0])
+            self.assertIn('-m pip "$@"', wrapper_content[0])
+
+    def test_python2_runtime_bootstraps_missing_pip_before_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            python2 = Path(directory) / "python2.7"
+            python2.touch()
+            pip_probes = 0
+
+            def run(command, **_kwargs):
+                nonlocal pip_probes
+                if command[1:4] == ["-m", "pip", "--version"]:
+                    pip_probes += 1
+                    return subprocess.CompletedProcess(
+                        command,
+                        1 if pip_probes == 1 else 0,
+                        stdout="" if pip_probes == 1 else "pip 20.3.4\n",
+                        stderr="",
+                    )
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            self.bootstrap.run = mock.Mock(side_effect=run)
+            self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertIn(
+                [str(python2.resolve()), "-m", "ensurepip", "--upgrade"],
+                commands,
+            )
+            self.assertEqual(pip_probes, 2)
 
     def test_docker_repository_targets_ubuntu_and_kali(self):
         self.bootstrap.distro = {
@@ -295,7 +352,7 @@ class InstallerTests(unittest.TestCase):
         expected = {
             "clang", "llvm", "lld", "ninja-build", "meson", "default-jdk",
             "qemu-user", "qemu-system", "hyfetch",
-            "xxd", "zsh", "shellcheck", "bash-completion",
+            "xxd", "zsh", "shellcheck", "bash-completion", "perl",
         }
         self.assertTrue(expected <= packages)
         self.assertFalse({"radare2", "libradare2-dev"} & packages)

@@ -49,7 +49,7 @@ REQUIRED_APT = [
     "libbz2-dev", "libreadline-dev", "libsqlite3-dev", "liblzma-dev", "libncurses-dev",
     "zlib1g-dev",
     "autoconf", "automake", "libtool", "cmake", "ninja-build", "meson",
-    "gawk", "bison", "flex", "gettext", "patch", "default-jdk",
+    "gawk", "bison", "flex", "gettext", "patch", "perl", "default-jdk",
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
@@ -123,6 +123,7 @@ ALLOWED_INSTALLER_HOSTS = {"install.pwndbg.re"}
 
 PYTHON2_VERSION = "2.7.18"
 PYENV_URL = "https://github.com/pyenv/pyenv.git"
+PYTHON2_COMMAND_DIR = Path("/usr/local/bin")
 
 RADARE2_MIN_VERSION = (6, 1, 4)
 RADARE2_URL = "https://github.com/radareorg/radare2.git"
@@ -705,11 +706,94 @@ class Bootstrap:
                 return Path(candidate)
         return None
 
+    def python2_pip_ready(self, executable: Path | str) -> bool:
+        result = self.run(
+            [str(executable), "-m", "pip", "--version"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        return result.returncode == 0 and "pip " in (result.stdout or "").lower()
+
+    def configure_python2_runtime(self, python2: Path) -> bool:
+        python2 = python2.resolve()
+        if not self.python2_pip_ready(python2):
+            self.info("Python 2 pip module is missing; bootstrapping it with ensurepip")
+            ensurepip = self.run(
+                [str(python2), "-m", "ensurepip", "--upgrade"],
+                check=False,
+                timeout=300,
+            )
+            if ensurepip.returncode != 0 or not self.python2_pip_ready(python2):
+                return False
+
+        for name in ("python2", "python2.7"):
+            result = self.run(
+                ["ln", "-sf", str(python2), str(PYTHON2_COMMAND_DIR / name)],
+                sudo=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                self.failures.append(f"Python 2 command link failed: {name}")
+                return False
+
+        wrapper: Path | None = None
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix="init-pip2-",
+                suffix=".sh",
+                delete=False,
+            )
+            wrapper = Path(handle.name)
+            with handle:
+                handle.write(
+                    "#!/bin/sh\n"
+                    f"exec {shlex.quote(str(python2))} -m pip \"$@\"\n"
+                )
+            install = self.run(
+                [
+                    "install", "-m", "0755", str(wrapper),
+                    str(PYTHON2_COMMAND_DIR / "pip2"),
+                ],
+                sudo=True,
+                check=False,
+            )
+            if install.returncode != 0:
+                self.failures.append("Python 2 command installation failed: pip2")
+                return False
+        except OSError as exc:
+            self.failures.append(f"Python 2 pip2 wrapper creation failed: {exc}")
+            return False
+        finally:
+            if wrapper is not None:
+                try:
+                    wrapper.unlink()
+                except OSError:
+                    pass
+
+        pip2_check = self.run(
+            [str(PYTHON2_COMMAND_DIR / "pip2"), "--version"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if pip2_check.returncode != 0:
+            self.failures.append("Python 2 pip2 command failed verification")
+            return False
+        return True
+
     def install_python2_legacy(self) -> None:
         existing = self.existing_python2()
         if existing is not None:
-            self.ok(f"Python 2 legacy runtime: already installed ({existing})")
-            return
+            if self.configure_python2_runtime(existing):
+                self.ok(f"Python 2 legacy runtime and pip2: already configured ({existing})")
+                return
+            self.warn(
+                f"existing Python 2 at {existing} has no usable pip; "
+                "installing the isolated pyenv runtime"
+            )
         if not self.clone_or_update("pyenv", PYENV_URL):
             self.failures.append("Python 2 legacy runtime installation failed")
             return
@@ -727,36 +811,13 @@ class Bootstrap:
         if result.returncode != 0 or not python2.exists() or not self.valid_python2(python2):
             self.failures.append("Python 2 legacy runtime installation failed")
             return
-
-        pip_check = self.run(
-            [str(python2), "-m", "pip", "--version"], check=False, capture=True, timeout=30
-        )
-        if pip_check.returncode != 0:
-            ensurepip = self.run(
-                [str(python2), "-m", "ensurepip", "--upgrade"],
-                check=False,
-                timeout=300,
-            )
-            if ensurepip.returncode != 0:
+        if not self.configure_python2_runtime(python2):
+            if not any("Python 2" in failure for failure in self.failures):
                 self.failures.append("Python 2 pip installation failed")
-                return
-
-        links = [(python2, "python2"), (python2, "python2.7")]
-        pip2 = self.python2_prefix() / "bin" / "pip2"
-        if not pip2.exists():
-            pip2 = self.python2_prefix() / "bin" / "pip2.7"
-        if pip2.exists():
-            links.append((pip2, "pip2"))
-        for source, name in links:
-            result = self.run(
-                ["ln", "-sf", str(source), f"/usr/local/bin/{name}"],
-                sudo=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                self.failures.append(f"Python 2 command link failed: {name}")
-                return
-        self.ok("Python 2.7.18 legacy runtime installed without changing system Python")
+            return
+        self.ok(
+            "Python 2.7.18 legacy runtime and pip2 installed without changing system Python"
+        )
 
     def install_python_tools(self) -> None:
         python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
@@ -1354,9 +1415,19 @@ except gdb.error:
             ("gcc", ["gcc"]),
             ("g++", ["g++"]),
             ("clang", ["clang"]),
+            ("GNU make", ["make"]),
             ("cmake", ["cmake"]),
+            ("ninja", ["ninja"]),
+            ("meson", ["meson"]),
+            ("GNU linker", ["ld"]),
             ("java", ["java"]),
             ("javac", ["javac"]),
+            ("ruby", ["ruby"]),
+            ("gem", ["gem"]),
+            ("bundler", ["bundle", "bundler"]),
+            ("perl", ["perl"]),
+            ("bash", ["bash"]),
+            ("zsh", ["zsh"]),
             ("gdb", ["gdb"]),
             ("gdb-multiarch", ["gdb-multiarch"]),
             ("checksec", ["checksec"]),
@@ -1369,6 +1440,7 @@ except gdb.error:
             ("7z", ["7z"]),
             ("hyfetch", ["hyfetch"]),
             ("nasm", ["nasm"]),
+            ("yasm", ["yasm"]),
             ("valgrind", ["valgrind"]),
             ("apktool", ["apktool"]),
             ("steghide", ["steghide"]),
@@ -1432,6 +1504,15 @@ except gdb.error:
         python2 = self.existing_python2()
         if python2 is not None:
             self.ok(f"Python 2.7 legacy runtime: {python2}")
+            pip2 = self.find_command(["pip2"])
+            if pip2 and self.python2_pip_ready(python2):
+                self.ok(f"Python 2 pip: {pip2}")
+            else:
+                ok_all = False
+                message = "verification failed: Python 2 pip2 command unavailable"
+                if message not in self.failures:
+                    self.failures.append(message)
+                self.error(message)
         else:
             ok_all = False
             message = "verification failed: working Python 2.7 runtime not found"
@@ -1448,7 +1529,22 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        python = self.system_python()
+        pip3 = self.run(
+            [python, "-m", "pip", "--version"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if pip3.returncode == 0:
+            self.ok("Python 3 pip")
+        else:
+            ok_all = False
+            message = "verification failed: Python 3 pip module unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
         imports = self.run(
             [python, "-c", "; ".join(f"import {module}" for module in PYTHON_IMPORTS)],
             check=False,
