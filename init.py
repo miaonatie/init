@@ -112,6 +112,9 @@ HELPER_REPOS = {
     "libc-database": "https://github.com/niklasb/libc-database.git",
 }
 
+GLIBC_AIO_DIR = TOOLS_DIR / "glibc-all-in-one"
+LIBC_DATABASE_DIR = TOOLS_DIR / "libc-database"
+
 REMOTE_INSTALLERS = {
     "pwndbg": ("https://install.pwndbg.re", ["-t", "pwndbg-gdb", "-u"]),
 }
@@ -1205,17 +1208,65 @@ except gdb.error:
             if not self.clone_or_update(name, url):
                 continue
             if name == "glibc-all-in-one":
-                update_list = TOOLS_DIR / name / "update_list"
-                libc_list = TOOLS_DIR / name / "list"
-                if update_list.exists() and not (libc_list.exists() and libc_list.stat().st_size > 0):
-                    result = self.run(
-                        ["bash", "./update_list"],
-                        cwd=update_list.parent,
-                        check=False,
-                        network=True,
-                    )
-                    if result.returncode != 0:
-                        self.skipped.append("glibc-all-in-one list update failed")
+                self.install_glibc_all_in_one()
+
+    def install_glibc_all_in_one(self) -> None:
+        project_file = GLIBC_AIO_DIR / "pyproject.toml"
+        if not project_file.exists() and (GLIBC_AIO_DIR / ".git").exists():
+            self.info("glibc-all-in-one: updating the legacy checkout to v2")
+            update = self.run(
+                [
+                    "git", "-C", str(GLIBC_AIO_DIR), "pull", "--ff-only",
+                    "origin", "master",
+                ],
+                check=False,
+                network=True,
+                timeout=300,
+                env={"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"},
+            )
+            if update.returncode != 0:
+                self.failures.append("glibc-all-in-one v2 source update failed")
+                return
+
+        if not project_file.exists():
+            self.failures.append(
+                "glibc-all-in-one v2 metadata not found after repository installation"
+            )
+            return
+
+        if not self.command_exists("glibc-aio"):
+            self.info("glibc-all-in-one: installing the v2 glibc-aio command")
+            install = self.run(
+                [
+                    self.system_python(), "-m", "pip", "install",
+                    "--break-system-packages", "--disable-pip-version-check",
+                    "--upgrade", "--editable", str(GLIBC_AIO_DIR),
+                ],
+                sudo=True,
+                check=False,
+                network=True,
+                timeout=300,
+                env={"PIP_ROOT_USER_ACTION": "ignore"},
+            )
+            self._extend_path()
+            if install.returncode != 0 or not self.command_exists("glibc-aio"):
+                self.failures.append("glibc-all-in-one v2 command installation failed")
+                return
+        else:
+            self.ok("glibc-aio: already installed")
+
+        libc_list = GLIBC_AIO_DIR / "list"
+        if not (libc_list.exists() and libc_list.stat().st_size > 0):
+            self.info("glibc-all-in-one: updating the libc package index")
+            update_list = self.run(
+                ["glibc-aio", "mirror", "update"],
+                cwd=GLIBC_AIO_DIR,
+                check=False,
+                network=True,
+                timeout=300,
+            )
+            if update_list.returncode != 0:
+                self.failures.append("glibc-all-in-one libc index update failed")
 
     def download_installer(self, name: str, url: str) -> Path:
         parsed = urlparse(url)
@@ -1435,6 +1486,30 @@ except gdb.error:
         else:
             ok_all = False
             message = "verification failed: Pwndbg r2ghidra integration unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        managed_repositories = (
+            ("glibc-all-in-one", GLIBC_AIO_DIR),
+            ("libc-database", LIBC_DATABASE_DIR),
+        )
+        for label, path in managed_repositories:
+            if (path / ".git").exists():
+                self.ok(f"{label}: {path}")
+            else:
+                ok_all = False
+                message = f"verification failed: {label} repository not found at {path}"
+                if message not in self.failures:
+                    self.failures.append(message)
+                self.error(message)
+
+        glibc_aio = self.find_command(["glibc-aio"])
+        if glibc_aio:
+            self.ok(f"glibc-aio: {glibc_aio}")
+        else:
+            ok_all = False
+            message = "verification failed: glibc-aio command not found"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)

@@ -80,6 +80,11 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.run.assert_not_called()
             self.assertEqual(self.bootstrap.failures, [])
 
+    def test_managed_git_repositories_live_under_tools(self):
+        self.assertEqual(MODULE.GLIBC_AIO_DIR, MODULE.TOOLS_DIR / "glibc-all-in-one")
+        self.assertEqual(MODULE.LIBC_DATABASE_DIR, MODULE.TOOLS_DIR / "libc-database")
+        self.assertEqual(self.bootstrap.python2_prefix().parents[2], MODULE.TOOLS_DIR)
+
     def test_python_install_uses_break_system_packages_globally(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
@@ -467,6 +472,74 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("pi import r2pipe; print(r2pipe.__file__)", command)
         self.assertIn("help ghidra", command)
         self.assertIn("r2pipe pdg?", command)
+
+    def test_glibc_all_in_one_v2_installs_editable_cli_and_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "glibc-all-in-one"
+            destination.mkdir()
+            (destination / "pyproject.toml").write_text(
+                "[project]\nname='glibc-aio'\n", encoding="utf-8"
+            )
+            self.bootstrap.command_exists = mock.Mock(side_effect=[False, True])
+            self.bootstrap.run = mock.Mock(
+                side_effect=[
+                    subprocess.CompletedProcess(["pip", "install"], 0),
+                    subprocess.CompletedProcess(["glibc-aio", "mirror", "update"], 0),
+                ]
+            )
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
+                self.bootstrap.install_glibc_all_in_one()
+            install_call, index_call = self.bootstrap.run.call_args_list
+            install_command = install_call.args[0]
+            self.assertIn("--editable", install_command)
+            self.assertEqual(
+                install_command[install_command.index("--editable") + 1],
+                str(destination),
+            )
+            self.assertTrue(install_call.kwargs["sudo"])
+            self.assertEqual(
+                index_call.args[0], ["glibc-aio", "mirror", "update"]
+            )
+            self.assertEqual(index_call.kwargs["cwd"], destination)
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_glibc_all_in_one_v2_skips_work_when_ready(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "glibc-all-in-one"
+            destination.mkdir()
+            (destination / "pyproject.toml").touch()
+            (destination / "list").write_text("libc6 example\n", encoding="utf-8")
+            self.bootstrap.command_exists = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock()
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
+                self.bootstrap.install_glibc_all_in_one()
+            self.bootstrap.run.assert_not_called()
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_glibc_legacy_checkout_is_fast_forwarded_to_v2(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "glibc-all-in-one"
+            (destination / ".git").mkdir(parents=True)
+
+            def run(command, **_kwargs):
+                if command[:3] == ["git", "-C", str(destination)]:
+                    (destination / "pyproject.toml").touch()
+                return subprocess.CompletedProcess(command, 0)
+
+            self.bootstrap.command_exists = mock.Mock(side_effect=[False, True])
+            self.bootstrap.run = mock.Mock(side_effect=run)
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
+                self.bootstrap.install_glibc_all_in_one()
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertEqual(
+                commands[0],
+                [
+                    "git", "-C", str(destination), "pull", "--ff-only",
+                    "origin", "master",
+                ],
+            )
+            self.assertTrue(any("--editable" in command for command in commands))
+            self.assertEqual(self.bootstrap.failures, [])
 
     def test_ctf_toolchain_configures_bridge_after_pwndbg(self):
         names = [
