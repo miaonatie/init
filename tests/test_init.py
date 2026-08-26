@@ -449,6 +449,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run_node_shell = mock.Mock(
             return_value=subprocess.CompletedProcess(["bash"], 0)
         )
+        self.bootstrap.node_runtime_available = mock.Mock(return_value=True)
         self.bootstrap.node_environment_available = mock.Mock(return_value=True)
 
         self.bootstrap.install_node_environment()
@@ -476,6 +477,36 @@ class InstallerTests(unittest.TestCase):
 
         self.bootstrap.run_node_shell.assert_not_called()
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_partial_node_environment_repairs_corepack_without_reinstalling_node(self):
+        self.bootstrap.install_nvm = mock.Mock(return_value=True)
+        self.bootstrap.configure_node_shells = mock.Mock(return_value=True)
+        self.bootstrap.node_environment_available = mock.Mock(side_effect=[False, True])
+        self.bootstrap.node_runtime_available = mock.Mock(return_value=True)
+        self.bootstrap.run_node_shell = mock.Mock(
+            return_value=subprocess.CompletedProcess(["bash"], 0)
+        )
+
+        self.bootstrap.install_node_environment()
+
+        commands = self.bootstrap.run_node_shell.call_args.args[0]
+        self.assertIn("nvm use --silent default", commands)
+        self.assertNotIn("nvm install --lts", commands)
+        self.assertIn("npm install --global corepack@latest", commands)
+        self.assertIn("corepack install --global pnpm@latest", commands)
+        self.assertIn("corepack install --global yarn@stable", commands)
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_node_shell_uses_short_nvm_lock_wait_and_stale_lock_recovery(self):
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["bash"], 0)
+        )
+
+        self.bootstrap.run_node_shell("nvm install --lts")
+
+        environment = self.bootstrap.run.call_args.kwargs["env"]
+        self.assertEqual(environment["NVM_INSTALL_LOCK_TIMEOUT"], "20")
+        self.assertEqual(environment["NVM_INSTALL_LOCK_STALE"], "10")
 
     def test_node_probe_is_reused_within_one_installer_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -737,6 +768,8 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(second.count(MODULE.GDBINIT_END), 1)
             bridge = script.read_text(encoding="utf-8")
             self.assertIn(str(target), bridge)
+            self.assertIn("importlib.invalidate_caches()", bridge)
+            self.assertIn("import r2pipe as _init_r2pipe", bridge)
             self.assertIn('super().__init__("ghidra"', bridge)
             self.assertIn('gdb.execute(f"r2pipe pdg @', bridge)
 
@@ -749,6 +782,7 @@ class InstallerTests(unittest.TestCase):
                 ["pwndbg-ctf"],
                 0,
                 stdout=(
+                    "INIT_R2PIPE_OK=/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
                     "Decompile an address with Pwndbg\n"
                     "Native Ghidra decompiler plugin\n"
                 ),
@@ -777,6 +811,7 @@ class InstallerTests(unittest.TestCase):
                 mock.patch.object(MODULE, "ZSHRC", zshrc),
                 mock.patch.object(MODULE, "PWNDBG_CTF_COMMAND", launcher),
                 mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", bridge),
+                mock.patch.object(MODULE, "PWNDBG_PYTHON_DIR", root / "pwndbg-python"),
             ):
                 self.assertTrue(self.bootstrap.configure_pwndbg_launcher())
                 self.assertTrue(self.bootstrap.configure_pwndbg_launcher())
@@ -784,6 +819,8 @@ class InstallerTests(unittest.TestCase):
             source = self.bootstrap.install_command_wrapper.call_args.args[1]
             self.assertIn(backend, source)
             self.assertIn(f"-x {bridge}", source)
+            self.assertIn("export PYTHONPATH=", source)
+            self.assertIn(str(root / "pwndbg-python"), source)
             for profile in (bashrc, zshrc):
                 text = profile.read_text(encoding="utf-8")
                 self.assertEqual(text.count(MODULE.PWNDBG_PROFILE_BEGIN), 1)
@@ -799,7 +836,7 @@ class InstallerTests(unittest.TestCase):
                 ["pwndbg"],
                 0,
                 stdout=(
-                    "/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
+                    "INIT_R2PIPE_OK=/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
                     "Decompile an address with Pwndbg, radare2 and r2ghidra.\n"
                     "Native Ghidra decompiler plugin\n"
                 ),
@@ -813,7 +850,7 @@ class InstallerTests(unittest.TestCase):
         command = self.bootstrap.run.call_args.args[0]
         self.assertIn("-x", command)
         self.assertIn(str(MODULE.PWNDBG_BRIDGE_SCRIPT), command)
-        self.assertIn("pi import r2pipe; print(r2pipe.__file__)", command)
+        self.assertTrue(any("INIT_R2PIPE_OK=" in argument for argument in command))
         self.assertIn("help ghidra", command)
         self.assertIn("r2pipe pdg?", command)
 

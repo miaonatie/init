@@ -1,4 +1,4 @@
-# init v3.17
+# init v3.18
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -20,7 +20,7 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
 - Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令；检测到 Debian/Kali 禁用系统 Python 2 的 ensurepip 时会直接切换到 pyenv，不再做无效重试。
-- Node.js 通过 `~/tools/nvm` 管理，安装当前 LTS、npm、Corepack、pnpm 和 Yarn，同时配置 Bash/Zsh。
+- Node.js 通过 `~/tools/nvm` 管理，安装当前 LTS、npm、Corepack、pnpm 和 Yarn，同时配置 Bash/Zsh；Node 已可用但包管理器缺失时只修复 Corepack/pnpm/Yarn，不重复安装 Node。
 - Rust 通过官方 rustup 安装 stable、Cargo、rustfmt 和 Clippy，同时配置 Bash/Zsh。
 - Docker 安装 Engine、Buildx 和 Compose 插件；默认使用 `sudo docker ...`。
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
@@ -55,7 +55,7 @@ Go、PHP、Lua 和 .NET 当前不默认安装：需要时可单独安装或使�
 
 ### Node.js、pnpm 与 Yarn
 
-Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；首次安装或 `--update` 模式会使用当前 LTS，并准备最新版 pnpm 和稳定版 Yarn。默认重复运行只做可用性检查：
+Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；首次安装或 `--update` 模式会使用当前 LTS，并准备最新版 pnpm 和稳定版 Yarn。脚本会分别探测 Node/npm 运行时和 Corepack/pnpm/Yarn：后者单独损坏时不会触发 `nvm install`。NVM 安装锁最多等待 20 秒，并允许 NVM 自动接管超过 10 分钟的遗留锁，避免异常中断后再次运行卡住 600 秒。默认重复运行只做可用性检查：
 
 脚本会先创建自定义的 `~/tools/nvm`。这一步不能省略：NVM 安装器在预设的 `NVM_DIR` 不存在时会直接退出。
 
@@ -185,8 +185,8 @@ q            退出
 新版会同时解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`，以及便携版启动器使用 `-nx`、不会读取 `~/.gdbinit` 的问题：
 
 - 将固定版本的 r2pipe 安装到 `~/.local/share/pwndbg-python`；
-- 生成 `~/.local/share/init/gdb/r2ghidra.py`；
-- 安装 `/usr/local/bin/pwndbg-ctf`，用 `-x` 显式加载桥接脚本；
+- 生成 `~/.local/share/init/gdb/r2ghidra.py`，在 Pwndbg 会话中显式导入隔离目录里的 r2pipe；
+- 安装 `/usr/local/bin/pwndbg-ctf`，预先设置专用 `PYTHONPATH` 并用 `-x` 显式加载桥接脚本；
 - 在 Bash/Zsh 配置中添加托管的 `pwndbg` 函数，使日常的 `pwndbg ./chall` 自动走上述启动器；
 - `~/.gdbinit` 仍保留一段带起止标记的配置，供普通系统 GDB 使用，不改动其他个人设置；
 - 安装完成后用 Pwndbg 批处理模式实际验证 r2pipe、快捷命令和 `pdg`。
@@ -213,7 +213,7 @@ r2pipe pdg @ main     直接执行原始 r2pipe/r2ghidra 命令
 
 ```bash
 pwndbg-ctf -q --batch /bin/true \
-  -ex 'pi import r2pipe; print(r2pipe.__file__)' \
+  -ex "pi import r2pipe; print('INIT_R2PIPE_OK=' + r2pipe.__file__)" \
   -ex 'help ghidra' \
   -ex 'r2pipe pdg?'
 ```
