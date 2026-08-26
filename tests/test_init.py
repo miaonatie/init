@@ -828,6 +828,20 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.bootstrap.install_r2pipe_for_pwndbg())
         self.bootstrap.run.assert_not_called()
 
+    def test_r2pipe_forced_repair_reinstalls_even_when_probe_was_healthy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "pwndbg-python"
+            self.bootstrap.r2pipe_target_available = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
+            )
+
+            with mock.patch.object(MODULE, "PWNDBG_PYTHON_DIR", target):
+                self.assertTrue(self.bootstrap.install_r2pipe_for_pwndbg(force=True))
+
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("--force-reinstall", command)
+
     def test_r2pipe_health_probe_is_cached_within_one_run(self):
         self.bootstrap.run = mock.Mock(
             return_value=subprocess.CompletedProcess(
@@ -865,6 +879,8 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("importlib.invalidate_caches()", bridge)
             self.assertIn("spec_from_file_location", bridge)
             self.assertIn('sys.modules["r2pipe"] = module', bridge)
+            self.assertIn("_init_r2pipe_checked", bridge)
+            self.assertIn("r2pipe.py", bridge)
             self.assertIn('super().__init__("ghidra"', bridge)
             self.assertIn('gdb.execute(f"r2pipe pdg @', bridge)
             self.assertIn("_init_decompile_with_external_r2", bridge)
@@ -897,6 +913,8 @@ class InstallerTests(unittest.TestCase):
             fake_gdb.TYPE_CODE_FUNC = 1
             fake_gdb.error = FakeGdbError
             fake_gdb.execute.side_effect = FakeGdbError("not registered")
+            fake_gdb._init_r2pipe_checked = False
+            fake_gdb._init_r2pipe_module = None
 
             old_path = list(sys.path)
             with (
@@ -978,6 +996,58 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.configure_pwndbg_launcher.assert_called_once_with()
         self.bootstrap.pwndbg_r2ghidra_probe.assert_called_once_with()
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_pwndbg_bridge_repairs_native_r2pipe_once_when_only_fallback_works(self):
+        self.bootstrap.install_r2pipe_for_pwndbg = mock.Mock(return_value=True)
+        self.bootstrap.configure_pwndbg_r2ghidra = mock.Mock(return_value=True)
+        self.bootstrap.configure_pwndbg_launcher = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(
+                    ["pwndbg-ctf"],
+                    0,
+                    stdout=(
+                        "Decompile an address with Pwndbg\n"
+                        "INIT_GHIDRA_OK=external-r2\n"
+                    ),
+                    stderr="Could not import r2pipe python library\n",
+                ),
+                subprocess.CompletedProcess(
+                    ["pwndbg-ctf"],
+                    0,
+                    stdout=(
+                        "INIT_R2PIPE_OK=/target/r2pipe/__init__.py\n"
+                        "Decompile an address with Pwndbg\n"
+                        "INIT_GHIDRA_OK=pwndbg-r2pipe\n"
+                    ),
+                    stderr="",
+                ),
+            ]
+        )
+
+        self.bootstrap.install_pwndbg_r2ghidra_bridge()
+
+        self.assertEqual(
+            self.bootstrap.install_r2pipe_for_pwndbg.call_args_list,
+            [mock.call(), mock.call(force=True)],
+        )
+        self.assertEqual(self.bootstrap.pwndbg_r2ghidra_probe.call_count, 2)
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_external_ghidra_fallback_does_not_mask_broken_native_r2pipe(self):
+        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["pwndbg-ctf"],
+                0,
+                stdout=(
+                    "Decompile an address with Pwndbg\n"
+                    "INIT_GHIDRA_OK=external-r2\n"
+                ),
+                stderr="Could not import r2pipe python library\n",
+            )
+        )
+
+        self.assertFalse(self.bootstrap.pwndbg_r2ghidra_available())
 
     def test_pwndbg_portable_launcher_is_idempotent_for_bash_and_zsh(self):
         with tempfile.TemporaryDirectory() as directory:

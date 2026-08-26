@@ -1,4 +1,4 @@
-# init v3.20
+# init v3.21
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -27,7 +27,7 @@ APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢�
 - radare2 会验证最低版本 6.1.4；发行版软件源版本过旧时，自动从官方 Git 源码安装到 `/usr/local`。
 - r2ghidra 使用官方 r2pm 用户级安装，不需要安装完整的 Ghidra GUI。
 - r2pipe 固定安装到 `~/.local/share/pwndbg-python`，桥接脚本会按绝对路径装载它，不依赖便携版 Pwndbg 会覆盖的 `PYTHONPATH`。
-- 自动生成 Pwndbg 的 `ghidra` 快捷命令和 `pwndbg-ctf` 启动器；优先复用 Pwndbg 的有状态 r2pipe，异常时自动降级到外部 radare2，兼容新版便携版 Pwndbg。
+- 自动生成 init 自定义的 `ghidra` 快捷命令和 `pwndbg-ctf` 启动器；优先复用 Pwndbg 官方的有状态 `r2pipe`，异常时自动降级到外部 radare2，兼容新版便携版 Pwndbg。
 - 对主要命令执行实际启动探测，不再把“文件存在”误判成“工具可用”；Python/Ruby 命令损坏时会重新安装。
 - 脚本主动克隆的源码和 CTF 数据库统一放在 `~/tools`，包管理器自己的标准目录不强行迁移。
 
@@ -188,13 +188,13 @@ q            退出
 新版会同时解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`，以及便携版启动器使用 `-nx`、不会读取 `~/.gdbinit` 的问题。Pwndbg 的启动器会重建 `PYTHONPATH`，所以仅在外部设置该变量并不可靠。已有 Pwndbg 不再只检查命令名，而会实际启动其 Python 并导入 `pwndbg`；损坏时才重新运行安装器：
 
 - 将固定版本的 r2pipe 安装到 `~/.local/share/pwndbg-python`；
-- 生成 `~/.local/share/init/gdb/r2ghidra.py`，先正常导入 r2pipe，失败时再从准确的 `__init__.py` 路径装载并注册到调试器 Python；
+- 生成 `~/.local/share/init/gdb/r2ghidra.py`，先正常导入 r2pipe，失败时再从准确的包目录或单文件模块路径装载并注册到调试器 Python；
 - `ghidra` 优先调用 Pwndbg 官方的有状态 `r2pipe`，同一调试目标只做一次完整分析，后续调用更快；
 - 如果 Pwndbg 内部导入仍因未来版本布局变化而失败，`ghidra` 会直接启动外部 `r2`，并根据 `/proc/PID/maps` 自动选择主程序或共享库及其 PIE 基址；
 - 安装 `/usr/local/bin/pwndbg-ctf`，用 `-x` 显式加载桥接脚本，不再依赖会被 Pwndbg 覆盖的 `PYTHONPATH`；
 - 在 Bash/Zsh 配置中添加托管的 `pwndbg` 函数，使日常的 `pwndbg ./chall` 自动走上述启动器；
 - `~/.gdbinit` 仍保留一段带起止标记的配置，供普通系统 GDB 使用，不改动其他个人设置；
-- 安装完成后临时编译一个很小的测试 ELF，用 Pwndbg 在 `main` 断点处实际执行 `ghidra &main`，不是只检查命令是否存在。
+- 安装完成后临时编译一个很小的测试 ELF，同时验证 Pwndbg 内部 `import r2pipe`、原生 `r2pipe` 命令和 `ghidra &main` 的真实反编译；只有外部 r2 兜底成功不再被判为完整成功，原生 r2pipe 异常时会强制修复一次。
 
 Ubuntu、Kali、原生 Linux、WSL 和 Linux 虚拟机的用法相同：
 
@@ -211,27 +211,25 @@ start                 启动并停在程序入口附近
 ghidra                反编译当前 $pc 所在地址
 ghidra &main          反编译 main
 ghidra 0x4011d6       反编译指定地址
-r2pipe pdg @ main     直接执行原始 r2pipe/r2ghidra 命令
+r2pipe aaa            使用 Pwndbg 原生命令进行完整分析
+r2pipe pdg @ sym.main 使用 Pwndbg 原生 r2pipe/r2ghidra 反编译
 ```
 
-`ghidra` 输出的是接近 C 的反编译结果（不是普通反汇编）。第一次会运行完整分析，通常较慢；同一个 Pwndbg 会话中的后续调用会复用 r2pipe 进程。若要按 Pwndbg 官方方式把反编译结果固定显示在 context 中，可在进入 Pwndbg 后执行：
+`ghidra` 输出的是接近 C 的反编译结果（不是普通反汇编）。第一次会运行完整分析，通常较慢；同一个 Pwndbg 会话中的后续调用会复用 r2pipe 进程。这里的 `ghidra` 是 init 提供的快捷命令，不是新版 Pwndbg 原生命令；新版 Pwndbg 对 r2ghidra 的原生入口是 `r2pipe`。
 
-```text
-set r2decompiler radare2
-set context-ghidra if-no-source
-context
-```
-
-这个 context 功能依赖 Pwndbg 内部的 r2pipe；按需执行 `ghidra` 还具有外部 r2 兜底，因此更适合作为默认流程。
+新版 Pwndbg 另有 `di install ghidra`、`di connect` 和 `decomp`，那是基于 decomp2dbg、需要完整 Ghidra GUI 和插件服务器的另一套官方集成，不等同于轻量的 r2ghidra。旧教程中的 `ctx-ghidra`、`set r2decompiler radare2` 和 `set context-ghidra` 已不适用于当前新版。
 
 排错时依次检查：
 
 ```bash
 r2 -q -c 'pdg?;q' /bin/true
-pwndbg-ctf -q --batch /bin/true -ex 'help ghidra'
+pwndbg-ctf -q --batch /bin/true \
+  -ex "pi import r2pipe; print(r2pipe.__file__)" \
+  -ex 'r2pipe pdg?' \
+  -ex 'help ghidra'
 ```
 
-第一条应包含 `Native Ghidra decompiler plugin`，第二条应显示 `Decompile an address with Pwndbg, radare2 and r2ghidra`。重新执行 `python3 init.py` 时，验证阶段还会进行一次真实反编译。旧版教程中的 `ctx-ghidra` 已不是当前推荐入口；这里统一使用 `ghidra`，context 显示则使用上面的 `set context-ghidra`。
+第一条和 Pwndbg 中的 `r2pipe pdg?` 都应包含 `Native Ghidra decompiler plugin`，Python 输出应位于 `~/.local/share/pwndbg-python`，`help ghidra` 应显示 `Decompile an address with Pwndbg, radare2 and r2ghidra`。重新执行 `python3 init.py` 时还会进行一次真实反编译。
 
 ## 安装位置与 CTF 数据库
 

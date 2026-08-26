@@ -1255,10 +1255,12 @@ class Bootstrap:
             return self._r2pipe_available_cache
         probe_code = (
             "import sys\n"
+            "from pathlib import Path\n"
             f"sys.path.insert(0, {str(PWNDBG_PYTHON_DIR)!r})\n"
             "import r2pipe\n"
             "from importlib.metadata import version\n"
             f"assert version('r2pipe') == {R2PIPE_VERSION!r}\n"
+            f"assert Path(r2pipe.__file__).resolve().is_relative_to(Path({str(PWNDBG_PYTHON_DIR)!r}).resolve())\n"
             "print(r2pipe.__file__)\n"
         )
         result = self.run(
@@ -1270,8 +1272,8 @@ class Bootstrap:
         self._r2pipe_available_cache = result.returncode == 0
         return self._r2pipe_available_cache
 
-    def install_r2pipe_for_pwndbg(self) -> bool:
-        if self.r2pipe_target_available():
+    def install_r2pipe_for_pwndbg(self, *, force: bool = False) -> bool:
+        if not force and self.r2pipe_target_available():
             self.ok(
                 f"r2pipe {R2PIPE_VERSION} for Pwndbg: already installed "
                 f"({PWNDBG_PYTHON_DIR})"
@@ -1280,13 +1282,15 @@ class Bootstrap:
 
         PWNDBG_PYTHON_DIR.mkdir(parents=True, exist_ok=True)
         self.info(
-            f"installing r2pipe {R2PIPE_VERSION} into Pwndbg's fixed Python path"
+            f"{'repairing' if force else 'installing'} r2pipe {R2PIPE_VERSION} "
+            "in Pwndbg's fixed Python path"
         )
+        reinstall = ["--force-reinstall"] if force else []
         result = self.run(
             [
                 self.system_python(), "-m", "pip", "install",
                 "--break-system-packages", "--disable-pip-version-check",
-                *PIP_NETWORK_OPTIONS, "--upgrade", "--no-deps",
+                *PIP_NETWORK_OPTIONS, "--upgrade", *reinstall, "--no-deps",
                 "--target", str(PWNDBG_PYTHON_DIR),
                 f"r2pipe=={R2PIPE_VERSION}",
             ],
@@ -1431,30 +1435,50 @@ importlib.invalidate_caches()
 
 def _init_load_r2pipe():
     """Load r2pipe even when the portable Pwndbg launcher isolates sys.path."""
+    if getattr(gdb, "_init_r2pipe_checked", False):
+        cached = getattr(gdb, "_init_r2pipe_module", None)
+        if cached is not None:
+            sys.modules["r2pipe"] = cached
+        return cached
     try:
-        return importlib.import_module("r2pipe")
+        module = importlib.import_module("r2pipe")
     except Exception as normal_exc:
         package_dir = Path(R2PIPE_PATH) / "r2pipe"
-        init_file = package_dir / "__init__.py"
+        package_file = package_dir / "__init__.py"
+        module_file = Path(R2PIPE_PATH) / "r2pipe.py"
         try:
+            if package_file.is_file():
+                init_file = package_file
+                search_locations = [str(package_dir)]
+            elif module_file.is_file():
+                init_file = module_file
+                search_locations = None
+            else:
+                raise FileNotFoundError(
+                    f"r2pipe module not found under {{R2PIPE_PATH}}"
+                )
             spec = importlib.util.spec_from_file_location(
                 "r2pipe",
                 init_file,
-                submodule_search_locations=[str(package_dir)],
+                submodule_search_locations=search_locations,
             )
             if spec is None or spec.loader is None:
                 raise ImportError(f"cannot create a module spec for {{init_file}}")
             module = importlib.util.module_from_spec(spec)
             sys.modules["r2pipe"] = module
             spec.loader.exec_module(module)
-            return module
         except Exception as direct_exc:
             sys.modules.pop("r2pipe", None)
+            gdb._init_r2pipe_checked = True
+            gdb._init_r2pipe_module = None
             print(
                 "init r2pipe fast path unavailable: "
                 f"normal={{normal_exc!r}}; direct={{direct_exc!r}}"
             )
             return None
+    gdb._init_r2pipe_checked = True
+    gdb._init_r2pipe_module = module
+    return module
 
 
 _INIT_R2PIPE = _init_load_r2pipe()
@@ -1793,8 +1817,9 @@ except gdb.error:
         output = ((result.stdout or "") + (result.stderr or "")).lower()
         return (
             result.returncode == 0
+            and "init_r2pipe_ok=" in output
             and "decompile an address with pwndbg" in output
-            and "init_ghidra_ok=" in output
+            and "init_ghidra_ok=pwndbg-r2pipe" in output
         )
 
     def install_pwndbg_r2ghidra_bridge(self) -> None:
@@ -1808,12 +1833,26 @@ except gdb.error:
         probe = self.pwndbg_r2ghidra_probe()
         output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         if (
+            "init_r2pipe_ok=" not in output
+            or "init_ghidra_ok=pwndbg-r2pipe" not in output
+        ):
+            self.warn(
+                "Pwndbg could not use its native r2pipe command; "
+                "repairing the isolated package once"
+            )
+            if not self.install_r2pipe_for_pwndbg(force=True):
+                return
+            self._pwndbg_probe_cache = None
+            probe = self.pwndbg_r2ghidra_probe()
+            output = ((probe.stdout or "") + (probe.stderr or "")).lower()
+        if (
             probe.returncode == 0
+            and "init_r2pipe_ok=" in output
             and "decompile an address with pwndbg" in output
-            and "init_ghidra_ok=" in output
+            and "init_ghidra_ok=pwndbg-r2pipe" in output
         ):
             self.ok(
-                "Pwndbg r2ghidra bridge configured and verified with real decompilation; "
+                "Pwndbg native r2pipe and r2ghidra verified with real decompilation; "
                 "pwndbg-ctf and shell pwndbg command are ready"
             )
         else:
