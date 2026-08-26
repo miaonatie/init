@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -862,9 +863,55 @@ class InstallerTests(unittest.TestCase):
             bridge = script.read_text(encoding="utf-8")
             self.assertIn(str(target), bridge)
             self.assertIn("importlib.invalidate_caches()", bridge)
-            self.assertIn("import r2pipe as _init_r2pipe", bridge)
+            self.assertIn("spec_from_file_location", bridge)
+            self.assertIn('sys.modules["r2pipe"] = module', bridge)
             self.assertIn('super().__init__("ghidra"', bridge)
             self.assertIn('gdb.execute(f"r2pipe pdg @', bridge)
+            self.assertIn("_init_decompile_with_external_r2", bridge)
+            self.assertIn('f"aaa; s {address:#x}; af; pdg"', bridge)
+            self.assertIn('command.extend(["-B", hex(base)])', bridge)
+            self.assertNotIn("shell=True", bridge)
+
+    def test_pwndbg_bridge_can_load_r2pipe_by_exact_package_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "pwndbg-python"
+            package = target / "r2pipe"
+            package.mkdir(parents=True)
+            (package / "__init__.py").write_text(
+                "from .open_sync import marker\n", encoding="utf-8"
+            )
+            (package / "open_sync.py").write_text(
+                "marker = 'exact-path-ok'\n", encoding="utf-8"
+            )
+
+            class FakeGdbError(Exception):
+                pass
+
+            class FakeCommand:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+            fake_gdb = mock.Mock()
+            fake_gdb.Command = FakeCommand
+            fake_gdb.COMMAND_USER = 0
+            fake_gdb.TYPE_CODE_FUNC = 1
+            fake_gdb.error = FakeGdbError
+            fake_gdb.execute.side_effect = FakeGdbError("not registered")
+
+            old_path = list(sys.path)
+            with (
+                mock.patch.object(MODULE, "PWNDBG_PYTHON_DIR", target),
+                mock.patch.dict(sys.modules, {"gdb": fake_gdb}, clear=False),
+                mock.patch("importlib.import_module", side_effect=ModuleNotFoundError("isolated")),
+            ):
+                sys.modules.pop("r2pipe", None)
+                sys.modules.pop("r2pipe.open_sync", None)
+                namespace = {}
+                exec(MODULE.Bootstrap.pwndbg_bridge_source(), namespace)
+                self.assertEqual(namespace["_INIT_R2PIPE"].marker, "exact-path-ok")
+            sys.path[:] = old_path
+            sys.modules.pop("r2pipe", None)
+            sys.modules.pop("r2pipe.open_sync", None)
 
     def test_healthy_pwndbg_backend_skips_remote_installer(self):
         self.bootstrap.pwndbg_backend_available = mock.Mock(return_value=True)
@@ -919,7 +966,8 @@ class InstallerTests(unittest.TestCase):
                 stdout=(
                     "INIT_R2PIPE_OK=/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
                     "Decompile an address with Pwndbg\n"
-                    "Native Ghidra decompiler plugin\n"
+                    "int main(void) { return twice(21); }\n"
+                    "INIT_GHIDRA_OK=pwndbg-r2pipe\n"
                 ),
                 stderr="",
             )
@@ -954,8 +1002,7 @@ class InstallerTests(unittest.TestCase):
             source = self.bootstrap.install_command_wrapper.call_args.args[1]
             self.assertIn(backend, source)
             self.assertIn(f"-x {bridge}", source)
-            self.assertIn("export PYTHONPATH=", source)
-            self.assertIn(str(root / "pwndbg-python"), source)
+            self.assertNotIn("PYTHONPATH", source)
             for profile in (bashrc, zshrc):
                 text = profile.read_text(encoding="utf-8")
                 self.assertEqual(text.count(MODULE.PWNDBG_PROFILE_BEGIN), 1)
@@ -967,27 +1014,38 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.find_command = mock.Mock(return_value="/usr/local/bin/pwndbg")
         self.bootstrap.r2pipe_target_available = mock.Mock(return_value=True)
         self.bootstrap.run = mock.Mock(
-            return_value=subprocess.CompletedProcess(
+            side_effect=[
+                subprocess.CompletedProcess(["gcc"], 0, stdout="", stderr=""),
+                subprocess.CompletedProcess(
                 ["pwndbg"],
                 0,
                 stdout=(
                     "INIT_R2PIPE_OK=/home/test/.local/share/pwndbg-python/r2pipe/__init__.py\n"
                     "Decompile an address with Pwndbg, radare2 and r2ghidra.\n"
-                    "Native Ghidra decompiler plugin\n"
+                    "int main(void) { return twice(21); }\n"
+                    "INIT_GHIDRA_OK=pwndbg-r2pipe\n"
                 ),
                 stderr="",
-            )
+                ),
+            ]
         )
         with mock.patch.object(
             MODULE, "PWNDBG_CTF_COMMAND", Path("/nonexistent/pwndbg-ctf")
         ):
             self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
-        command = self.bootstrap.run.call_args.args[0]
+        self.assertEqual(self.bootstrap.run.call_count, 2)
+        command = self.bootstrap.run.call_args_list[1].args[0]
         self.assertIn("-x", command)
         self.assertIn(str(MODULE.PWNDBG_BRIDGE_SCRIPT), command)
         self.assertTrue(any("INIT_R2PIPE_OK=" in argument for argument in command))
         self.assertIn("help ghidra", command)
-        self.assertIn("r2pipe pdg?", command)
+        self.assertIn("break main", command)
+        self.assertIn("run", command)
+        self.assertIn("ghidra &main", command)
+        self.assertEqual(
+            self.bootstrap.run.call_args_list[1].kwargs["env"],
+            {"INIT_GHIDRA_PROBE": "1"},
+        )
 
     def test_glibc_all_in_one_v2_installs_editable_cli_and_index(self):
         with tempfile.TemporaryDirectory() as directory:
