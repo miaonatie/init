@@ -25,8 +25,10 @@ TOOLS_DIR = HOME / "tools"
 VERSION_FILE = ROOT / "VERSION"
 VERSION = VERSION_FILE.read_text(encoding="utf-8").strip() if VERSION_FILE.exists() else "dev"
 
-NETWORK_ATTEMPTS = 3
-NETWORK_DELAYS = (2, 5)
+NETWORK_ATTEMPTS = 2
+NETWORK_DELAYS = (2,)
+APT_FALLBACK_CHUNK_SIZE = 8
+PIP_NETWORK_OPTIONS = ("--retries", "2", "--timeout", "30")
 APT_UPDATE_WARN_PATTERNS = (
     "Failed to fetch",
     "Some index files failed",
@@ -233,14 +235,20 @@ DOCKER_SOURCE = Path("/etc/apt/sources.list.d/docker.sources")
 
 
 class Bootstrap:
-    def __init__(self) -> None:
+    def __init__(self, *, update_existing: bool = False) -> None:
         self.failures: list[str] = []
         self.skipped: list[str] = []
         self.started_monotonic = time.monotonic()
         self.step = 0
         self.step_total = 4
         self.apt_updated = False
+        self.update_existing = update_existing
         self._package_cache: dict[str, bool] = {}
+        self._node_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._rust_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._pwndbg_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._r2ghidra_available_cache: bool | None = None
+        self._glibc_runtime_cache: bool | None = None
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
         self.is_wsl = self.detect_wsl()
@@ -434,7 +442,7 @@ class Bootstrap:
     @staticmethod
     def apt_options() -> list[str]:
         return [
-            "-o", "Acquire::Retries=3",
+            "-o", "Acquire::Retries=1",
             "-o", "Dpkg::Options::=--force-confold",
         ]
 
@@ -587,23 +595,51 @@ class Bootstrap:
         if result.returncode == 0:
             return available_ok
 
-        self.warn(f"batch install failed for {label}; retrying remaining packages individually")
+        self.warn(
+            f"batch install failed for {label}; isolating failures in "
+            f"chunks of {APT_FALLBACK_CHUNK_SIZE}"
+        )
         ok_all = available_ok
-        for package in [p for p in missing if not self.package_installed(p)]:
-            result = self.run(
+        remaining = [package for package in missing if not self.package_installed(package)]
+        chunks = [
+            remaining[index:index + APT_FALLBACK_CHUNK_SIZE]
+            for index in range(0, len(remaining), APT_FALLBACK_CHUNK_SIZE)
+        ]
+        for chunk in chunks:
+            chunk_result = self.run(
                 [
                     "apt-get", *self.apt_options(), "install", "-y", "--fix-missing",
-                    "--no-install-recommends", package,
+                    "--no-install-recommends", *chunk,
                 ],
                 sudo=True,
                 check=False,
                 env=self.apt_env(),
             )
-            self._package_cache[package] = result.returncode == 0
-            if result.returncode != 0:
-                ok_all = False
-                message = f"APT package failed: {package}"
-                (self.failures if required else self.skipped).append(message)
+            self._package_cache.clear()
+            if chunk_result.returncode == 0:
+                for package in chunk:
+                    self._package_cache[package] = True
+                continue
+
+            failed_chunk = [
+                package for package in chunk if not self.package_installed(package)
+            ]
+            for package in failed_chunk:
+                package_result = self.run(
+                    [
+                        "apt-get", *self.apt_options(), "install", "-y", "--fix-missing",
+                        "--no-install-recommends", package,
+                    ],
+                    sudo=True,
+                    check=False,
+                    env=self.apt_env(),
+                )
+                installed = package_result.returncode == 0
+                self._package_cache[package] = installed
+                if not installed:
+                    ok_all = False
+                    message = f"APT package failed: {package}"
+                    (self.failures if required else self.skipped).append(message)
         return ok_all
 
     def install_system_foundation(self) -> None:
@@ -727,12 +763,12 @@ class Bootstrap:
             key_file = Path(key_handle.name)
             result = self.run(
                 [
-                    "curl", "-fsSL",
+                    "curl", "-fsSL", "--retry", "1", "--retry-delay", "2",
+                    "--retry-connrefused",
                     f"https://download.docker.com/linux/{family}/gpg",
                     "-o", str(key_file),
                 ],
                 check=False,
-                network=True,
                 timeout=60,
             )
             if result.returncode != 0 or key_file.stat().st_size < 100:
@@ -924,7 +960,6 @@ class Bootstrap:
         result = self.run(
             [str(pyenv), "install", "-s", PYTHON2_VERSION],
             check=False,
-            network=True,
             timeout=1800,
             env=env,
         )
@@ -978,11 +1013,11 @@ class Bootstrap:
         result = self.run(
             [
                 python, "-m", "pip", "install", "--break-system-packages",
-                "--disable-pip-version-check", "--upgrade", *missing,
+                "--disable-pip-version-check", *PIP_NETWORK_OPTIONS,
+                "--upgrade", *missing,
             ],
             sudo=True,
             check=False,
-            network=True,
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
         if result.returncode != 0:
@@ -1017,7 +1052,6 @@ class Bootstrap:
             ["gem", "install", "--no-document", *missing],
             sudo=True,
             check=False,
-            network=True,
         )
         self._extend_path()
         if result.returncode != 0:
@@ -1145,6 +1179,8 @@ class Bootstrap:
         return True
 
     def r2ghidra_available(self) -> bool:
+        if self._r2ghidra_available_cache is not None:
+            return self._r2ghidra_available_cache
         if not self.command_exists("r2"):
             return False
         result = self.run(
@@ -1154,7 +1190,10 @@ class Bootstrap:
             timeout=30,
         )
         output = ((result.stdout or "") + (result.stderr or "")).lower()
-        return result.returncode == 0 and "native ghidra decompiler" in output
+        self._r2ghidra_available_cache = (
+            result.returncode == 0 and "native ghidra decompiler" in output
+        )
+        return self._r2ghidra_available_cache
 
     def install_r2ghidra(self) -> None:
         if self.r2ghidra_available():
@@ -1192,6 +1231,7 @@ class Bootstrap:
             )
             return
 
+        self._r2ghidra_available_cache = None
         if self.r2ghidra_available():
             self.ok("r2ghidra installed and verified with pdg?")
         else:
@@ -1237,11 +1277,11 @@ class Bootstrap:
             [
                 self.system_python(), "-m", "pip", "install",
                 "--break-system-packages", "--disable-pip-version-check",
-                "--upgrade", "--no-deps", "--target", str(PWNDBG_PYTHON_DIR),
+                *PIP_NETWORK_OPTIONS, "--upgrade", "--no-deps",
+                "--target", str(PWNDBG_PYTHON_DIR),
                 f"r2pipe=={R2PIPE_VERSION}",
             ],
             check=False,
-            network=True,
             timeout=300,
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
@@ -1306,6 +1346,15 @@ class Bootstrap:
         return self.write_text_if_changed(path, updated.rstrip("\n") + "\n")
 
     def install_command_wrapper(self, destination: Path, content: str) -> bool:
+        normalized = content.rstrip("\n") + "\n"
+        try:
+            if (
+                destination.read_text(encoding="utf-8") == normalized
+                and os.access(destination, os.X_OK)
+            ):
+                return True
+        except OSError:
+            pass
         wrapper: Path | None = None
         try:
             handle = tempfile.NamedTemporaryFile(
@@ -1317,7 +1366,7 @@ class Bootstrap:
             )
             wrapper = Path(handle.name)
             with handle:
-                handle.write(content.rstrip("\n") + "\n")
+                handle.write(normalized)
             result = self.run(
                 ["install", "-m", "0755", str(wrapper), str(destination)],
                 sudo=True,
@@ -1462,20 +1511,24 @@ except gdb.error:
         return True
 
     def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
+        if self._pwndbg_probe_cache is not None:
+            return self._pwndbg_probe_cache
         if not self.r2pipe_target_available():
-            return subprocess.CompletedProcess(
+            self._pwndbg_probe_cache = subprocess.CompletedProcess(
                 [str(PWNDBG_CTF_COMMAND)], 1, "", "isolated r2pipe unavailable"
             )
+            return self._pwndbg_probe_cache
         if PWNDBG_CTF_COMMAND.exists():
             command = [str(PWNDBG_CTF_COMMAND)]
         else:
             backend = self.find_command(["pwndbg", "pwndbg-gdb"])
             if backend is None:
-                return subprocess.CompletedProcess(
+                self._pwndbg_probe_cache = subprocess.CompletedProcess(
                     ["pwndbg"], 127, "", "Pwndbg executable not found"
                 )
+                return self._pwndbg_probe_cache
             command = [backend, "-x", str(PWNDBG_BRIDGE_SCRIPT)]
-        return self.run(
+        self._pwndbg_probe_cache = self.run(
             [
                 *command, "-q", "--batch",
                 "-ex", "pi import r2pipe; print(r2pipe.__file__)",
@@ -1487,6 +1540,7 @@ except gdb.error:
             capture=True,
             timeout=90,
         )
+        return self._pwndbg_probe_cache
 
     def pwndbg_r2ghidra_available(self) -> bool:
         result = self.pwndbg_r2ghidra_probe()
@@ -1505,6 +1559,7 @@ except gdb.error:
             return
         if not self.configure_pwndbg_launcher():
             return
+        self._pwndbg_probe_cache = None
         probe = self.pwndbg_r2ghidra_probe()
         output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         if (
@@ -1558,13 +1613,13 @@ except gdb.error:
             result = self.run(
                 ["bash", str(installer)],
                 check=False,
-                network=True,
                 timeout=300,
                 env={"NVM_DIR": str(NVM_DIR), "PROFILE": "/dev/null"},
             )
             if result.returncode != 0 or self.nvm_version() != NVM_VERSION:
                 self.failures.append("nvm installation/update failed")
                 return False
+            self._node_probe_cache = None
             return True
         except Exception as exc:
             self.failures.append(f"nvm installation/update failed: {exc}")
@@ -1615,13 +1670,23 @@ except gdb.error:
             capture=capture,
             network=network,
             timeout=timeout,
-            env={"COREPACK_ENABLE_DOWNLOAD_PROMPT": "0"},
+            env={
+                "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                "npm_config_fetch_retries": "2",
+                "npm_config_fetch_retry_mintimeout": "1000",
+                "npm_config_fetch_retry_maxtimeout": "5000",
+            },
         )
 
     def node_environment_probe(self) -> subprocess.CompletedProcess[str]:
+        if self._node_probe_cache is not None:
+            return self._node_probe_cache
         if not (NVM_DIR / "nvm.sh").exists():
-            return subprocess.CompletedProcess(["nvm"], 1, "", "nvm.sh not found")
-        return self.run_node_shell(
+            self._node_probe_cache = subprocess.CompletedProcess(
+                ["nvm"], 1, "", "nvm.sh not found"
+            )
+            return self._node_probe_cache
+        self._node_probe_cache = self.run_node_shell(
             "nvm use --silent default >/dev/null\n"
             "printf 'nvm '; nvm --version\n"
             "printf 'node '; node --version\n"
@@ -1632,6 +1697,7 @@ except gdb.error:
             capture=True,
             timeout=90,
         )
+        return self._node_probe_cache
 
     def node_environment_available(self) -> bool:
         result = self.node_environment_probe()
@@ -1644,6 +1710,9 @@ except gdb.error:
     def install_node_environment(self) -> None:
         if not self.install_nvm() or not self.configure_node_shells():
             return
+        if not self.update_existing and self.node_environment_available():
+            self.ok("Node.js LTS, npm, Corepack, pnpm and Yarn: already configured")
+            return
         commands = (
             "nvm install --lts\n"
             "nvm alias default 'lts/*'\n"
@@ -1653,7 +1722,8 @@ except gdb.error:
             "corepack install --global pnpm@latest\n"
             "corepack install --global yarn@stable"
         )
-        result = self.run_node_shell(commands, network=True, timeout=900)
+        result = self.run_node_shell(commands, timeout=900)
+        self._node_probe_cache = None
         if result.returncode != 0 or not self.node_environment_available():
             self.failures.append(
                 "Node.js environment installation failed: nvm, Node LTS, Corepack, "
@@ -1686,6 +1756,8 @@ except gdb.error:
         return True
 
     def rust_environment_probe(self) -> subprocess.CompletedProcess[str]:
+        if self._rust_probe_cache is not None:
+            return self._rust_probe_cache
         commands = (
             [str(CARGO_HOME / "bin" / "rustup"), "--version"],
             [str(CARGO_HOME / "bin" / "rustc"), "--version"],
@@ -1703,11 +1775,13 @@ except gdb.error:
                 env=self.rust_env(),
             )
             if result.returncode != 0:
+                self._rust_probe_cache = result
                 return result
             outputs.append((result.stdout or "").strip())
-        return subprocess.CompletedProcess(
+        self._rust_probe_cache = subprocess.CompletedProcess(
             ["rust-toolchain-probe"], 0, "\n".join(outputs) + "\n", ""
         )
+        return self._rust_probe_cache
 
     def rust_environment_available(self) -> bool:
         result = self.rust_environment_probe()
@@ -1719,6 +1793,12 @@ except gdb.error:
 
     def install_rust_environment(self) -> None:
         rustup = CARGO_HOME / "bin" / "rustup"
+        if rustup.exists():
+            if not self.configure_rust_shells():
+                return
+            if not self.update_existing and self.rust_environment_available():
+                self.ok("Rust stable, Cargo, rustfmt and Clippy: already configured")
+                return
         if not rustup.exists():
             installer: Path | None = None
             try:
@@ -1730,12 +1810,17 @@ except gdb.error:
                         "--default-toolchain", "stable", "--no-modify-path",
                     ],
                     check=False,
-                    network=True,
                     timeout=900,
                     env=self.rust_env(),
                 )
                 if result.returncode != 0:
                     self.failures.append("Rust rustup installation failed")
+                    return
+                self._rust_probe_cache = None
+                if not self.configure_rust_shells():
+                    return
+                if self.rust_environment_available():
+                    self.ok("Rust stable, Cargo, rustfmt and Clippy installed with rustup")
                     return
             except Exception as exc:
                 self.failures.append(f"Rust rustup installation failed: {exc}")
@@ -1757,13 +1842,13 @@ except gdb.error:
             result = self.run(
                 command,
                 check=False,
-                network=True,
                 timeout=900,
                 env=self.rust_env(),
             )
             if result.returncode != 0:
                 self.failures.append("Rust stable toolchain update/configuration failed")
                 return
+        self._rust_probe_cache = None
         if not self.configure_rust_shells() or not self.rust_environment_available():
             self.failures.append(
                 "Rust environment verification failed: rustc, cargo, rustfmt or clippy unavailable"
@@ -1808,7 +1893,7 @@ except gdb.error:
 
     def install_helper_repositories(self) -> None:
         for name, url in HELPER_REPOS.items():
-            if not self.clone_or_update(name, url, update=True):
+            if not self.clone_or_update(name, url, update=self.update_existing):
                 continue
             if name == "glibc-all-in-one":
                 self.install_glibc_all_in_one()
@@ -1817,6 +1902,14 @@ except gdb.error:
 
     def install_glibc_all_in_one(self) -> None:
         project_file = GLIBC_AIO_DIR / "pyproject.toml"
+        if (
+            not self.update_existing
+            and project_file.exists()
+            and self.glibc_aio_runtime_available()
+            and self.glibc_aio_index_available()
+        ):
+            self.ok(f"glibc-aio: already configured ({GLIBC_AIO_COMMAND})")
+            return
         if not project_file.exists() and (GLIBC_AIO_DIR / ".git").exists():
             self.info("glibc-all-in-one: updating the legacy checkout to v2")
             update = self.run(
@@ -1842,7 +1935,7 @@ except gdb.error:
         python = self.system_python()
         pip_base = [
             python, "-m", "pip", "install", "--break-system-packages",
-            "--disable-pip-version-check", "--upgrade",
+            "--disable-pip-version-check", *PIP_NETWORK_OPTIONS, "--upgrade",
         ]
         self.info("glibc-all-in-one: ensuring the v2 Python dependencies")
         dependencies = self.run(
@@ -1850,7 +1943,6 @@ except gdb.error:
             cwd=GLIBC_AIO_DIR,
             sudo=True,
             check=False,
-            network=True,
             timeout=300,
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
@@ -1864,7 +1956,6 @@ except gdb.error:
             cwd=GLIBC_AIO_DIR,
             sudo=True,
             check=False,
-            network=True,
             timeout=300,
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
@@ -1880,6 +1971,7 @@ except gdb.error:
             self.failures.append("glibc-all-in-one v2 command wrapper installation failed")
             return
         self._extend_path()
+        self._glibc_runtime_cache = None
         if not self.glibc_aio_runtime_available():
             self.failures.append(
                 "glibc-all-in-one v2 runtime verification failed: "
@@ -1902,6 +1994,8 @@ except gdb.error:
         self.ok(f"glibc-aio: configured and usable from any directory ({GLIBC_AIO_COMMAND})")
 
     def glibc_aio_runtime_available(self) -> bool:
+        if self._glibc_runtime_cache is not None:
+            return self._glibc_runtime_cache
         python = self.system_python()
         imports = self.run(
             [python, "-c", "import elftools, zstandard, glibc_aio"],
@@ -1910,6 +2004,7 @@ except gdb.error:
             timeout=30,
         )
         if imports.returncode != 0 or not GLIBC_AIO_COMMAND.exists():
+            self._glibc_runtime_cache = False
             return False
         version = self.run(
             [str(GLIBC_AIO_COMMAND), "--version"],
@@ -1926,13 +2021,14 @@ except gdb.error:
             timeout=30,
         )
         mirror_output = (mirrors.stdout or "").lower()
-        return (
+        self._glibc_runtime_cache = (
             version.returncode == 0
             and "glibc-aio " in (version.stdout or "").lower()
             and mirrors.returncode == 0
             and "tuna" in mirror_output
             and "ubuntu-archive" in mirror_output
         )
+        return self._glibc_runtime_cache
 
     @staticmethod
     def glibc_aio_index_available() -> bool:
@@ -2003,7 +2099,10 @@ except gdb.error:
         return path
 
     def install_remote_tool(self, name: str, command_names: list[str]) -> None:
-        if any(self.command_exists(command) for command in command_names):
+        if (
+            any(self.command_exists(command) for command in command_names)
+            and not self.update_existing
+        ):
             self.ok(f"{name}: already installed")
             return
         url, arguments = REMOTE_INSTALLERS[name]
@@ -2013,10 +2112,11 @@ except gdb.error:
             result = self.run(
                 ["bash", str(installer), *arguments],
                 check=False,
-                network=True,
                 timeout=600,
             )
             self._extend_path()
+            if name == "pwndbg":
+                self._pwndbg_probe_cache = None
             if result.returncode != 0 or not any(self.command_exists(c) for c in command_names):
                 self.failures.append(f"{name} installation failed")
         except Exception as exc:
@@ -2316,7 +2416,8 @@ except gdb.error:
 
     def install(self) -> int:
         print(self.colorize("36;1", f"init {VERSION}"))
-        print("Target: CTF workstation | Mode: non-interactive")
+        mode = "update existing tools" if self.update_existing else "fast idempotent install"
+        print(f"Target: CTF workstation | Mode: non-interactive, {mode}")
         self.run_stage("Environment check", self.preflight)
         self.run_stage("System foundation", self.install_system_foundation)
         self.run_stage("CTF toolchain", self.install_ctf_toolchain)
@@ -2329,9 +2430,11 @@ def help_text() -> str:
 
 Usage:
   python3 init.py          Initialize and verify the CTF environment
+  python3 init.py --update Update managed tools, then verify everything
   python3 init.py --help   Show this help
 
-The default operation is safe to rerun. It does not run full-upgrade or autoremove.
+The default operation skips usable tools. --update refreshes managed language
+toolchains and repositories. Neither mode runs full-upgrade or autoremove.
 """.strip()
 
 
@@ -2339,11 +2442,11 @@ def main(argv: list[str]) -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    bootstrap = Bootstrap()
-    if argv:
+    if argv not in ([], ["--update"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
+    bootstrap = Bootstrap(update_existing=argv == ["--update"])
     try:
         return bootstrap.install()
     except KeyboardInterrupt:

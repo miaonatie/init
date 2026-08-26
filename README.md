@@ -1,4 +1,4 @@
-# init v3.16
+# init v3.17
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -13,9 +13,10 @@ python3 init.py
 不要使用 `sudo python3 init.py`；需要系统权限时脚本会自行调用 `sudo`，r2ghidra 等用户级工具会安装到当前用户目录。
 
 脚本分为 4 个阶段：环境检查、系统基础环境、CTF 工具链、最终验证。
-系统软件包按系统开发、日常 CLI、CTF CLI、32 位支持分批处理，失败定位和重试更快。
-已有的软件会先检查并跳过；可重复运行。
+系统软件包按系统开发、日常 CLI、CTF CLI、32 位支持分批处理，失败定位更快。
+默认是快速幂等模式：已有且通过实际探测的软件直接跳过，不再每次更新 Node、Rust、Pwndbg 和数据库仓库；需要主动更新时使用 `python3 init.py --update`。
 APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢整批安装；十六进制查看统一使用 `xxd`。
+网络操作最多只额外重试一次并等待 2 秒；pip、npm 等使用各自受限的下载重试，不会从头重复执行整条安装流程。APT 大批量安装失败时先按 8 个包分块定位，只有失败小块才逐包处理。
 
 - Python 3 工具直接安装到系统 Python（`--break-system-packages`）。
 - Python 2.7 通过 pyenv 隔离安装，分别验证运行时、pip 模块和 `pip2` 命令；检测到 Debian/Kali 禁用系统 Python 2 的 ensurepip 时会直接切换到 pyenv，不再做无效重试。
@@ -54,7 +55,7 @@ Go、PHP、Lua 和 .NET 当前不默认安装：需要时可单独安装或使�
 
 ### Node.js、pnpm 与 Yarn
 
-Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；Node 本身始终安装当前 LTS，不把具体大版本写死。Corepack 会先更新到最新版，再启用并准备最新版 pnpm 和稳定版 Yarn：
+Node 使用固定版本的 NVM 安装器，避免安装流程随远端脚本无提示变化；首次安装或 `--update` 模式会使用当前 LTS，并准备最新版 pnpm 和稳定版 Yarn。默认重复运行只做可用性检查：
 
 脚本会先创建自定义的 `~/tools/nvm`。这一步不能省略：NVM 安装器在预设的 `NVM_DIR` 不存在时会直接退出。
 
@@ -81,7 +82,7 @@ corepack install --global yarn@stable
 
 ### Rust 与 Cargo
 
-Rust 使用官方 rustup 的默认 profile 和 stable 工具链，默认 profile 已包含常用开发组件，脚本还会显式确认 rustfmt 与 Clippy：
+Rust 使用官方 rustup 的默认 profile 和 stable 工具链，默认 profile 已包含常用开发组件，脚本还会显式确认 rustfmt 与 Clippy。默认重复运行不会再执行耗时的 `rustup update`，只有环境缺失、损坏或使用 `--update` 时才更新：
 
 ```bash
 rustup show
@@ -231,7 +232,7 @@ pwndbg-ctf -q --batch /bin/true \
 | `~/tools/glibc-all-in-one` | glibc-all-in-one v2、libc 包索引和以后下载的 `libs/` | 只更新小型索引 |
 | `~/tools/libc-database` | libc 指纹识别和偏移查询脚本；以后下载的数据仍保存在该目录 | 默认不下载全部 libc |
 
-`glibc-all-in-one` 新版不再只是几段 shell 脚本。脚本会先更新托管仓库，再按上游 v2 的方式显式安装依赖和 editable 包：
+`glibc-all-in-one` 新版不再只是几段 shell 脚本。首次安装、环境损坏或 `--update` 模式会按上游 v2 的方式安装依赖和 editable 包：
 
 ```bash
 cd ~/tools/glibc-all-in-one
@@ -249,7 +250,7 @@ glibc-aio download 2.27-3ubuntu1_amd64
 glibc-aio ./libc.so.6
 ```
 
-`libc-database` 也会更新托管仓库，并配置四个可从任意目录使用的包装命令：
+`libc-database` 会配置四个可从任意目录使用的包装命令；默认重复运行不会拉取仓库，`--update` 时才执行快进更新：
 
 ```bash
 libc-db-identify ./libc.so.6
@@ -281,11 +282,19 @@ git clone --depth 1 https://github.com/danielmiessler/SecLists.git ~/tools/SecLi
 
 glibc 数据库也不会默认把所有 libc 下载完；只有索引会自动更新，具体版本按题目需要下载，避免环境初始化无谓占用数十 GB。
 
-## 更新
+## 重复运行与更新
 
-更新后重新运行即可：
+普通重复运行用于补齐缺失工具、修复配置并完成验证，速度更快：
 
 ```bash
 git pull
 python3 init.py
 ```
+
+需要主动更新托管内容时：
+
+```bash
+python3 init.py --update
+```
+
+`--update` 会刷新 Node.js LTS/Corepack/pnpm/Yarn、Rust stable、Pwndbg、glibc-all-in-one 和 libc-database，然后进行完整验证。它不会执行 `apt full-upgrade`、`autoremove`，也不会在现有 radare2 已满足 r2ghidra 版本要求时重新编译 radare2。

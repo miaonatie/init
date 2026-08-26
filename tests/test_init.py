@@ -22,6 +22,15 @@ class InstallerTests(unittest.TestCase):
     def test_version_has_single_source_of_truth(self):
         self.assertEqual(MODULE.VERSION, (ROOT / "VERSION").read_text(encoding="utf-8").strip())
 
+    def test_update_flag_selects_explicit_update_mode(self):
+        bootstrap = mock.Mock()
+        bootstrap.install.return_value = 0
+        with mock.patch.object(MODULE, "Bootstrap", return_value=bootstrap) as constructor:
+            self.assertEqual(MODULE.main(["--update"]), 0)
+        constructor.assert_called_once_with(update_existing=True)
+        bootstrap.install.assert_called_once_with()
+        self.assertIn("--update", MODULE.help_text())
+
     def test_rejects_unapproved_installer_url(self):
         with self.assertRaises(RuntimeError):
             self.bootstrap.download_installer("test", "http://example.com/install.sh")
@@ -67,6 +76,40 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertTrue(self.bootstrap.apt_install(["sample"], "test", required=True))
         self.assertNotIn("network", self.bootstrap.run.call_args.kwargs)
+
+    def test_apt_failed_batch_falls_back_to_chunks_not_every_package(self):
+        packages = [f"package-{index}" for index in range(18)]
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.package_available = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess(["apt-get"], 1),
+                subprocess.CompletedProcess(["apt-get"], 0),
+                subprocess.CompletedProcess(["apt-get"], 0),
+                subprocess.CompletedProcess(["apt-get"], 0),
+            ]
+        )
+
+        self.assertTrue(self.bootstrap.apt_install(packages, "test", required=True))
+        self.assertEqual(self.bootstrap.run.call_count, 4)
+        fallback_sizes = [
+            len(call.args[0]) - call.args[0].index("--no-install-recommends") - 1
+            for call in self.bootstrap.run.call_args_list[1:]
+        ]
+        self.assertEqual(fallback_sizes, [8, 8, 2])
+
+    @mock.patch.object(MODULE.time, "sleep")
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_network_retry_is_limited_to_one_short_retry(self, run, _sleep):
+        run.side_effect = [
+            subprocess.CompletedProcess(["git"], 1),
+            subprocess.CompletedProcess(["git"], 0),
+        ]
+        result = self.bootstrap.run(["git", "fetch"], check=False, network=True)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(run.call_count, 2)
+        _sleep.assert_called_once_with(2)
 
     def test_existing_repository_is_not_updated(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -400,6 +443,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn('[ -f "$HOME/.cargo/env" ]', text)
 
     def test_node_install_uses_lts_and_corepack_managed_package_managers(self):
+        self.bootstrap.update_existing = True
         self.bootstrap.install_nvm = mock.Mock(return_value=True)
         self.bootstrap.configure_node_shells = mock.Mock(return_value=True)
         self.bootstrap.run_node_shell = mock.Mock(
@@ -418,9 +462,37 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("corepack enable", commands)
         self.assertIn("corepack install --global pnpm@latest", commands)
         self.assertIn("corepack install --global yarn@stable", commands)
-        self.assertTrue(call.kwargs["network"])
+        self.assertNotIn("network", call.kwargs)
         self.assertEqual(call.kwargs["timeout"], 900)
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_healthy_node_environment_skips_all_network_updates(self):
+        self.bootstrap.install_nvm = mock.Mock(return_value=True)
+        self.bootstrap.configure_node_shells = mock.Mock(return_value=True)
+        self.bootstrap.node_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.run_node_shell = mock.Mock()
+
+        self.bootstrap.install_node_environment()
+
+        self.bootstrap.run_node_shell.assert_not_called()
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_node_probe_is_reused_within_one_installer_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nvm_dir = Path(directory) / "nvm"
+            nvm_dir.mkdir()
+            (nvm_dir / "nvm.sh").touch()
+            result = subprocess.CompletedProcess(
+                ["bash"], 0,
+                stdout="nvm 0.40.7\nnode v24\nnpm 11\ncorepack 1\npnpm 10\nyarn 4\n",
+                stderr="",
+            )
+            self.bootstrap.run_node_shell = mock.Mock(return_value=result)
+            with mock.patch.object(MODULE, "NVM_DIR", nvm_dir):
+                self.assertTrue(self.bootstrap.node_environment_available())
+                self.assertTrue(self.bootstrap.node_environment_available())
+
+        self.bootstrap.run_node_shell.assert_called_once()
 
     def test_nvm_installer_creates_custom_directory_before_running(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -442,6 +514,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(call.kwargs["env"]["PROFILE"], "/dev/null")
 
     def test_existing_rustup_updates_stable_and_standard_components(self):
+        self.bootstrap.update_existing = True
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cargo_home = root / ".cargo"
@@ -470,8 +543,50 @@ class InstallerTests(unittest.TestCase):
                     "rustfmt", "clippy",
                 ],
             )
-            self.assertTrue(all(call.kwargs["network"] for call in self.bootstrap.run.call_args_list))
+            self.assertTrue(
+                all("network" not in call.kwargs for call in self.bootstrap.run.call_args_list)
+            )
             self.assertEqual(self.bootstrap.failures, [])
+
+    def test_fresh_rustup_install_skips_redundant_immediate_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cargo_home = root / ".cargo"
+            rustup_home = root / ".rustup"
+            installer = root / "rustup-init.sh"
+            installer.touch()
+            self.bootstrap.download_installer = mock.Mock(return_value=installer)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["rustup-init"], 0)
+            )
+            self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
+            self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
+            with (
+                mock.patch.object(MODULE, "CARGO_HOME", cargo_home),
+                mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home),
+            ):
+                self.bootstrap.install_rust_environment()
+
+            self.bootstrap.run.assert_called_once()
+            command = self.bootstrap.run.call_args.args[0]
+            self.assertEqual(command[:2], ["sh", str(installer)])
+            self.assertNotIn("update", command)
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_healthy_rust_environment_skips_all_network_updates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cargo_home = Path(directory) / ".cargo"
+            rustup = cargo_home / "bin" / "rustup"
+            rustup.parent.mkdir(parents=True)
+            rustup.touch()
+            self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
+            self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock()
+            with mock.patch.object(MODULE, "CARGO_HOME", cargo_home):
+                self.bootstrap.install_rust_environment()
+
+        self.bootstrap.run.assert_not_called()
+        self.assertEqual(self.bootstrap.failures, [])
 
     def test_extended_toolchain_keeps_direct_system_python(self):
         packages = set(MODULE.REQUIRED_APT) | set(MODULE.DAILY_APT) | set(MODULE.CTF_APT)
@@ -741,6 +856,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(self.bootstrap.failures, [])
 
     def test_glibc_all_in_one_v2_repairs_package_even_when_index_is_ready(self):
+        self.bootstrap.update_existing = True
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "glibc-all-in-one"
             destination.mkdir()
@@ -822,6 +938,18 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(
                 result.stdout.splitlines(), [str(repository), str(sample)]
             )
+
+    def test_unchanged_executable_wrapper_skips_reinstallation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "wrapper"
+            content = "#!/bin/sh\nexec true\n"
+            destination.write_text(content, encoding="utf-8")
+            destination.chmod(0o755)
+            self.bootstrap.run = mock.Mock()
+
+            self.assertTrue(self.bootstrap.install_command_wrapper(destination, content))
+
+        self.bootstrap.run.assert_not_called()
 
     def test_libc_database_installs_direct_commands(self):
         with tempfile.TemporaryDirectory() as directory:
