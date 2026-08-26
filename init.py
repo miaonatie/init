@@ -244,11 +244,15 @@ class Bootstrap:
         self.apt_updated = False
         self.update_existing = update_existing
         self._package_cache: dict[str, bool] = {}
+        self._docker_ready_cache: bool | None = None
         self._node_runtime_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._node_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._rust_runtime_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._rust_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._pwndbg_backend_cache: bool | None = None
         self._pwndbg_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._r2ghidra_available_cache: bool | None = None
+        self._r2pipe_available_cache: bool | None = None
         self._glibc_runtime_cache: bool | None = None
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
@@ -720,7 +724,10 @@ class Bootstrap:
         return "ubuntu", suite
 
     def docker_ready(self) -> bool:
+        if self._docker_ready_cache is not None:
+            return self._docker_ready_cache
         if not all(self.command_exists(command) for command in ("docker", "containerd")):
+            self._docker_ready_cache = False
             return False
         for command in (
             ["docker", "--version"],
@@ -729,8 +736,10 @@ class Bootstrap:
             ["containerd", "--version"],
         ):
             if self.run(command, check=False, capture=True, timeout=30).returncode != 0:
+                self._docker_ready_cache = False
                 return False
-        return True
+        self._docker_ready_cache = True
+        return self._docker_ready_cache
 
     def setup_docker_repository(self) -> bool:
         family, suite = self.docker_repository()
@@ -829,8 +838,27 @@ class Bootstrap:
                 self.failures.append("failed to remove conflicting Docker packages")
                 return
 
-        if not self.apt_install(DOCKER_PACKAGES, "Docker CE", required=True):
+        if all(self.package_installed(package) for package in DOCKER_PACKAGES):
+            if not self.apt_update():
+                self.failures.append("Docker repair skipped because APT update failed")
+                return
+            self.info("Docker packages are present but unusable; reinstalling them once")
+            repair = self.run(
+                [
+                    "apt-get", *self.apt_options(), "install", "-y", "--reinstall",
+                    "--no-install-recommends", *DOCKER_PACKAGES,
+                ],
+                sudo=True,
+                check=False,
+                env=self.apt_env(),
+            )
+            self._package_cache.clear()
+            if repair.returncode != 0:
+                self.failures.append("Docker package repair failed")
+                return
+        elif not self.apt_install(DOCKER_PACKAGES, "Docker CE", required=True):
             return
+        self._docker_ready_cache = None
         if self.docker_ready():
             self.ok("Docker Engine, Buildx and Compose installed")
         else:
@@ -875,50 +903,27 @@ class Bootstrap:
                 return False
 
         for name in ("python2", "python2.7"):
-            result = self.run(
-                ["ln", "-sf", str(python2), str(PYTHON2_COMMAND_DIR / name)],
-                sudo=True,
-                check=False,
+            destination = PYTHON2_COMMAND_DIR / name
+            try:
+                already_linked = destination.resolve() == python2
+            except OSError:
+                already_linked = False
+            if already_linked:
+                continue
+            link = self.run(
+                ["ln", "-sf", str(python2), str(destination)], sudo=True, check=False
             )
-            if result.returncode != 0:
+            if link.returncode != 0:
                 self.failures.append(f"Python 2 command link failed: {name}")
                 return False
 
-        wrapper: Path | None = None
-        try:
-            handle = tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                prefix="init-pip2-",
-                suffix=".sh",
-                delete=False,
-            )
-            wrapper = Path(handle.name)
-            with handle:
-                handle.write(
-                    "#!/bin/sh\n"
-                    f"exec {shlex.quote(str(python2))} -m pip \"$@\"\n"
-                )
-            install = self.run(
-                [
-                    "install", "-m", "0755", str(wrapper),
-                    str(PYTHON2_COMMAND_DIR / "pip2"),
-                ],
-                sudo=True,
-                check=False,
-            )
-            if install.returncode != 0:
-                self.failures.append("Python 2 command installation failed: pip2")
-                return False
-        except OSError as exc:
-            self.failures.append(f"Python 2 pip2 wrapper creation failed: {exc}")
+        pip2_wrapper = (
+            "#!/bin/sh\n"
+            f"exec {shlex.quote(str(python2))} -m pip \"$@\"\n"
+        )
+        if not self.install_command_wrapper(PYTHON2_COMMAND_DIR / "pip2", pip2_wrapper):
+            self.failures.append("Python 2 command installation failed: pip2")
             return False
-        finally:
-            if wrapper is not None:
-                try:
-                    wrapper.unlink()
-                except OSError:
-                    pass
 
         pip2_check = self.run(
             [str(PYTHON2_COMMAND_DIR / "pip2"), "--version"],
@@ -1246,6 +1251,8 @@ class Bootstrap:
         return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 
     def r2pipe_target_available(self) -> bool:
+        if self._r2pipe_available_cache is not None:
+            return self._r2pipe_available_cache
         probe_code = (
             "import sys\n"
             f"sys.path.insert(0, {str(PWNDBG_PYTHON_DIR)!r})\n"
@@ -1260,7 +1267,8 @@ class Bootstrap:
             capture=True,
             timeout=30,
         )
-        return result.returncode == 0
+        self._r2pipe_available_cache = result.returncode == 0
+        return self._r2pipe_available_cache
 
     def install_r2pipe_for_pwndbg(self) -> bool:
         if self.r2pipe_target_available():
@@ -1286,6 +1294,7 @@ class Bootstrap:
             timeout=300,
             env={"PIP_ROOT_USER_ACTION": "ignore"},
         )
+        self._r2pipe_available_cache = None
         if result.returncode != 0 or not self.r2pipe_target_available():
             self.failures.append(
                 "Pwndbg r2pipe installation failed: the isolated package could not be imported"
@@ -1839,6 +1848,40 @@ except gdb.error:
         )
         return self._rust_probe_cache
 
+    def rust_runtime_probe(self) -> subprocess.CompletedProcess[str]:
+        if self._rust_runtime_probe_cache is not None:
+            return self._rust_runtime_probe_cache
+        commands = (
+            [str(CARGO_HOME / "bin" / "rustup"), "--version"],
+            [str(CARGO_HOME / "bin" / "rustc"), "--version"],
+            [str(CARGO_HOME / "bin" / "cargo"), "--version"],
+        )
+        outputs: list[str] = []
+        for command in commands:
+            result = self.run(
+                command,
+                check=False,
+                capture=True,
+                timeout=60,
+                env=self.rust_env(),
+            )
+            if result.returncode != 0:
+                self._rust_runtime_probe_cache = result
+                return result
+            outputs.append((result.stdout or "").strip())
+        self._rust_runtime_probe_cache = subprocess.CompletedProcess(
+            ["rust-runtime-probe"], 0, "\n".join(outputs) + "\n", ""
+        )
+        return self._rust_runtime_probe_cache
+
+    def rust_runtime_available(self) -> bool:
+        result = self.rust_runtime_probe()
+        output = (result.stdout or "").lower()
+        return (
+            result.returncode == 0
+            and all(label in output for label in ("rustup ", "rustc ", "cargo "))
+        )
+
     def rust_environment_available(self) -> bool:
         result = self.rust_environment_probe()
         output = (result.stdout or "").lower()
@@ -1872,6 +1915,7 @@ except gdb.error:
                 if result.returncode != 0:
                     self.failures.append("Rust rustup installation failed")
                     return
+                self._rust_runtime_probe_cache = None
                 self._rust_probe_cache = None
                 if not self.configure_rust_shells():
                     return
@@ -1888,12 +1932,25 @@ except gdb.error:
                     except OSError:
                         pass
 
-        self.info("updating the Rust stable toolchain and standard components")
-        commands = (
-            [str(rustup), "update", "stable"],
-            [str(rustup), "default", "stable"],
-            [str(rustup), "component", "add", "--toolchain", "stable", "rustfmt", "clippy"],
-        )
+        runtime_ready = not self.update_existing and self.rust_runtime_available()
+        if not self.update_existing and runtime_ready:
+            self.info("repairing missing Rust standard components")
+            commands = (
+                [
+                    str(rustup), "component", "add", "--toolchain", "stable",
+                    "rustfmt", "clippy",
+                ],
+            )
+        else:
+            self.info("updating the Rust stable toolchain and standard components")
+            commands = (
+                [str(rustup), "update", "stable"],
+                [str(rustup), "default", "stable"],
+                [
+                    str(rustup), "component", "add", "--toolchain", "stable",
+                    "rustfmt", "clippy",
+                ],
+            )
         for command in commands:
             result = self.run(
                 command,
@@ -1904,6 +1961,7 @@ except gdb.error:
             if result.returncode != 0:
                 self.failures.append("Rust stable toolchain update/configuration failed")
                 return
+        self._rust_runtime_probe_cache = None
         self._rust_probe_cache = None
         if not self.configure_rust_shells() or not self.rust_environment_available():
             self.failures.append(
@@ -1958,11 +2016,12 @@ except gdb.error:
 
     def install_glibc_all_in_one(self) -> None:
         project_file = GLIBC_AIO_DIR / "pyproject.toml"
+        runtime_ready = project_file.exists() and self.glibc_aio_runtime_available()
+        index_ready = self.glibc_aio_index_available()
         if (
             not self.update_existing
-            and project_file.exists()
-            and self.glibc_aio_runtime_available()
-            and self.glibc_aio_index_available()
+            and runtime_ready
+            and index_ready
         ):
             self.ok(f"glibc-aio: already configured ({GLIBC_AIO_COMMAND})")
             return
@@ -1988,54 +2047,55 @@ except gdb.error:
             )
             return
 
-        python = self.system_python()
-        pip_base = [
-            python, "-m", "pip", "install", "--break-system-packages",
-            "--disable-pip-version-check", *PIP_NETWORK_OPTIONS, "--upgrade",
-        ]
-        self.info("glibc-all-in-one: ensuring the v2 Python dependencies")
-        dependencies = self.run(
-            [*pip_base, *GLIBC_AIO_DEPENDENCIES],
-            cwd=GLIBC_AIO_DIR,
-            sudo=True,
-            check=False,
-            timeout=300,
-            env={"PIP_ROOT_USER_ACTION": "ignore"},
-        )
-        if dependencies.returncode != 0:
-            self.failures.append("glibc-all-in-one v2 dependency installation failed")
-            return
-
-        self.info("glibc-all-in-one: installing the repository as an editable package")
-        editable = self.run(
-            [*pip_base, "--editable", "."],
-            cwd=GLIBC_AIO_DIR,
-            sudo=True,
-            check=False,
-            timeout=300,
-            env={"PIP_ROOT_USER_ACTION": "ignore"},
-        )
-        if editable.returncode != 0:
-            self.failures.append("glibc-all-in-one v2 editable installation failed")
-            return
-
-        wrapper = self.repository_command_wrapper(
-            GLIBC_AIO_DIR,
-            [python, "-c", "from glibc_aio.cli.main import main; main()"],
-        )
-        if not self.install_command_wrapper(GLIBC_AIO_COMMAND, wrapper):
-            self.failures.append("glibc-all-in-one v2 command wrapper installation failed")
-            return
-        self._extend_path()
-        self._glibc_runtime_cache = None
-        if not self.glibc_aio_runtime_available():
-            self.failures.append(
-                "glibc-all-in-one v2 runtime verification failed: "
-                "command or Python dependencies unavailable"
+        if self.update_existing or not runtime_ready:
+            python = self.system_python()
+            pip_base = [
+                python, "-m", "pip", "install", "--break-system-packages",
+                "--disable-pip-version-check", *PIP_NETWORK_OPTIONS, "--upgrade",
+            ]
+            self.info("glibc-all-in-one: ensuring the v2 Python dependencies")
+            dependencies = self.run(
+                [*pip_base, *GLIBC_AIO_DEPENDENCIES],
+                cwd=GLIBC_AIO_DIR,
+                sudo=True,
+                check=False,
+                timeout=300,
+                env={"PIP_ROOT_USER_ACTION": "ignore"},
             )
-            return
+            if dependencies.returncode != 0:
+                self.failures.append("glibc-all-in-one v2 dependency installation failed")
+                return
 
-        if not self.glibc_aio_index_available():
+            self.info("glibc-all-in-one: installing the repository as an editable package")
+            editable = self.run(
+                [*pip_base, "--editable", "."],
+                cwd=GLIBC_AIO_DIR,
+                sudo=True,
+                check=False,
+                timeout=300,
+                env={"PIP_ROOT_USER_ACTION": "ignore"},
+            )
+            if editable.returncode != 0:
+                self.failures.append("glibc-all-in-one v2 editable installation failed")
+                return
+
+            wrapper = self.repository_command_wrapper(
+                GLIBC_AIO_DIR,
+                [python, "-c", "from glibc_aio.cli.main import main; main()"],
+            )
+            if not self.install_command_wrapper(GLIBC_AIO_COMMAND, wrapper):
+                self.failures.append("glibc-all-in-one v2 command wrapper installation failed")
+                return
+            self._extend_path()
+            self._glibc_runtime_cache = None
+            if not self.glibc_aio_runtime_available():
+                self.failures.append(
+                    "glibc-all-in-one v2 runtime verification failed: "
+                    "command or Python dependencies unavailable"
+                )
+                return
+
+        if not index_ready:
             self.info("glibc-all-in-one: updating the libc package index")
             update_list = self.run(
                 [str(GLIBC_AIO_COMMAND), "mirror", "update"],
@@ -2154,12 +2214,38 @@ except gdb.error:
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
+    def pwndbg_backend_available(self, command_names: list[str]) -> bool:
+        if self._pwndbg_backend_cache is not None:
+            return self._pwndbg_backend_cache
+        backend = self.find_command(command_names)
+        if backend is None:
+            self._pwndbg_backend_cache = False
+            return False
+        probe = self.run(
+            [
+                backend, "-q", "--batch",
+                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
+                "/bin/true",
+            ],
+            check=False,
+            capture=True,
+            timeout=90,
+        )
+        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
+        self._pwndbg_backend_cache = (
+            probe.returncode == 0
+            and "init_pwndbg_ok" in output
+            and "traceback" not in output
+        )
+        return self._pwndbg_backend_cache
+
     def install_remote_tool(self, name: str, command_names: list[str]) -> None:
         if (
-            any(self.command_exists(command) for command in command_names)
+            name == "pwndbg"
+            and self.pwndbg_backend_available(command_names)
             and not self.update_existing
         ):
-            self.ok(f"{name}: already installed")
+            self.ok(f"{name}: already installed and launchable")
             return
         url, arguments = REMOTE_INSTALLERS[name]
         installer: Path | None = None
@@ -2172,8 +2258,14 @@ except gdb.error:
             )
             self._extend_path()
             if name == "pwndbg":
+                self._pwndbg_backend_cache = None
                 self._pwndbg_probe_cache = None
-            if result.returncode != 0 or not any(self.command_exists(c) for c in command_names):
+            available = result.returncode == 0 and (
+                self.pwndbg_backend_available(command_names)
+                if name == "pwndbg"
+                else any(self.command_exists(command) for command in command_names)
+            )
+            if not available:
                 self.failures.append(f"{name} installation failed")
         except Exception as exc:
             self.failures.append(f"{name} installation failed: {exc}")

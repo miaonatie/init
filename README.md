@@ -1,4 +1,4 @@
-# init v3.18
+# init v3.19
 
 Ubuntu 24.04+ / 最新 Kali 的一次性命令行 CTF 环境初始化工具。
 
@@ -15,6 +15,7 @@ python3 init.py
 脚本分为 4 个阶段：环境检查、系统基础环境、CTF 工具链、最终验证。
 系统软件包按系统开发、日常 CLI、CTF CLI、32 位支持分批处理，失败定位更快。
 默认是快速幂等模式：已有且通过实际探测的软件直接跳过，不再每次更新 Node、Rust、Pwndbg 和数据库仓库；需要主动更新时使用 `python3 init.py --update`。
+每项安装都先检查包、命令或源码是否存在，再进行必要的轻量启动探测；同一轮中的 Docker、Node、Rust、r2ghidra、r2pipe、Pwndbg 和 glibc-aio 探测会复用结果。只有缺失、版本不兼容或实际不可用的组件才进入对应修复流程。
 APT 会先排除当前软件源中不存在的包，避免一个无效包拖慢整批安装；十六进制查看统一使用 `xxd`。
 网络操作最多只额外重试一次并等待 2 秒；pip、npm 等使用各自受限的下载重试，不会从头重复执行整条安装流程。APT 大批量安装失败时先按 8 个包分块定位，只有失败小块才逐包处理。
 
@@ -82,7 +83,7 @@ corepack install --global yarn@stable
 
 ### Rust 与 Cargo
 
-Rust 使用官方 rustup 的默认 profile 和 stable 工具链，默认 profile 已包含常用开发组件，脚本还会显式确认 rustfmt 与 Clippy。默认重复运行不会再执行耗时的 `rustup update`，只有环境缺失、损坏或使用 `--update` 时才更新：
+Rust 使用官方 rustup 的默认 profile 和 stable 工具链，默认 profile 已包含常用开发组件，脚本还会显式确认 rustfmt 与 Clippy。默认重复运行不会再执行耗时的 `rustup update`；若 stable、Cargo 已可用而只缺 rustfmt/Clippy，仅修复组件，只有核心运行时缺失、损坏或使用 `--update` 时才更新整套工具链：
 
 ```bash
 rustup show
@@ -111,6 +112,8 @@ Rustup 使用自己的标准目录 `~/.rustup` 和 `~/.cargo`，避免破坏其�
 /usr/local/bin/python2  -> 检测到的 Python 2.7（默认是 ~/tools/pyenv/.../python2.7）
 /usr/local/bin/pip2     -> 同一个 Python 2.7 执行 -m pip
 ```
+
+重复运行会比较两个符号链接和 `pip2` 包装脚本的实际目标；内容与权限正确时不会再次执行 `ln` 或 `install`。
 
 这样即使 pyenv 只生成 `pip`、没有生成名为 `pip2` 的可执行文件，也不会再出现 `command not found`。检查：
 
@@ -182,7 +185,7 @@ q            退出
 
 ## 在 Pwndbg 中直接反编译
 
-新版会同时解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`，以及便携版启动器使用 `-nx`、不会读取 `~/.gdbinit` 的问题：
+新版会同时解决便携版 Pwndbg 与系统 Python 隔离造成的 `Could not import r2pipe python library`，以及便携版启动器使用 `-nx`、不会读取 `~/.gdbinit` 的问题。已有 Pwndbg 不再只检查命令名，而会实际启动其 Python 并导入 `pwndbg`；损坏时才重新运行安装器：
 
 - 将固定版本的 r2pipe 安装到 `~/.local/share/pwndbg-python`；
 - 生成 `~/.local/share/init/gdb/r2ghidra.py`，在 Pwndbg 会话中显式导入隔离目录里的 r2pipe；
@@ -232,7 +235,7 @@ pwndbg-ctf -q --batch /bin/true \
 | `~/tools/glibc-all-in-one` | glibc-all-in-one v2、libc 包索引和以后下载的 `libs/` | 只更新小型索引 |
 | `~/tools/libc-database` | libc 指纹识别和偏移查询脚本；以后下载的数据仍保存在该目录 | 默认不下载全部 libc |
 
-`glibc-all-in-one` 新版不再只是几段 shell 脚本。首次安装、环境损坏或 `--update` 模式会按上游 v2 的方式安装依赖和 editable 包：
+`glibc-all-in-one` 新版不再只是几段 shell 脚本。首次安装、Python 运行时损坏或 `--update` 模式会按上游 v2 的方式安装依赖和 editable 包；如果运行时健康但只有 libc 索引缺失，则只更新索引，不重复执行 pip：
 
 ```bash
 cd ~/tools/glibc-all-in-one
@@ -290,6 +293,8 @@ glibc 数据库也不会默认把所有 libc 下载完；只有索引会自动�
 git pull
 python3 init.py
 ```
+
+健康组件会直接跳过；检测到“包已安装但实际不可用”时只执行一次针对性修复，例如重新安装损坏的 Docker CE 包、修复 Rust 组件、重建 Pwndbg 或更新 glibc-aio 索引。相同的包装脚本、Shell 托管区块和符号链接不会重复写入。
 
 需要主动更新托管内容时：
 

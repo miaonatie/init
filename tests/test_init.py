@@ -231,6 +231,32 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(str(python2.resolve()), wrapper_content[0])
             self.assertIn('-m pip "$@"', wrapper_content[0])
 
+    def test_python2_runtime_does_not_rewrite_matching_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            command_dir = Path(directory) / "bin"
+            command_dir.mkdir()
+            python2 = Path(directory) / "python2.7"
+            python2.touch()
+            for name in ("python2", "python2.7"):
+                (command_dir / name).symlink_to(python2)
+            pip2 = command_dir / "pip2"
+            pip2.write_text(
+                "#!/bin/sh\n"
+                f"exec {python2.resolve()} -m pip \"$@\"\n",
+                encoding="utf-8",
+            )
+            pip2.chmod(0o755)
+            self.bootstrap.python2_pip_ready = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess([str(pip2)], 0)
+            )
+
+            with mock.patch.object(MODULE, "PYTHON2_COMMAND_DIR", command_dir):
+                self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
+
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertFalse(any(command[0] in {"ln", "install"} for command in commands))
+
     def test_python2_runtime_bootstraps_missing_pip_before_wrapper(self):
         with tempfile.TemporaryDirectory() as directory:
             python2 = Path(directory) / "python2.7"
@@ -277,6 +303,35 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_docker()
         self.bootstrap.setup_docker_repository.assert_not_called()
         self.bootstrap.apt_install.assert_not_called()
+
+    def test_docker_health_probe_is_cached_within_one_run(self):
+        self.bootstrap.command_exists = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["docker"], 0)
+        )
+
+        self.assertTrue(self.bootstrap.docker_ready())
+        self.assertTrue(self.bootstrap.docker_ready())
+
+        self.assertEqual(self.bootstrap.run.call_count, 4)
+
+    def test_broken_existing_docker_packages_are_reinstalled_once(self):
+        self.bootstrap.docker_ready = mock.Mock(side_effect=[False, True])
+        self.bootstrap.setup_docker_repository = mock.Mock(return_value=True)
+        self.bootstrap.package_installed = mock.Mock(
+            side_effect=lambda package: package in MODULE.DOCKER_PACKAGES
+        )
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["apt-get"], 0)
+        )
+
+        self.bootstrap.install_docker()
+
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("--reinstall", command)
+        self.assertEqual(self.bootstrap.run.call_count, 1)
+        self.assertEqual(self.bootstrap.failures, [])
 
     def test_docker_repository_configuration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -579,6 +634,32 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(self.bootstrap.failures, [])
 
+    def test_existing_rust_runtime_repairs_components_without_updating_toolchain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cargo_home = Path(directory) / ".cargo"
+            rustup = cargo_home / "bin" / "rustup"
+            rustup.parent.mkdir(parents=True)
+            rustup.touch()
+            self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
+            self.bootstrap.rust_environment_available = mock.Mock(side_effect=[False, True])
+            self.bootstrap.rust_runtime_available = mock.Mock(return_value=True)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["rustup"], 0)
+            )
+
+            with mock.patch.object(MODULE, "CARGO_HOME", cargo_home):
+                self.bootstrap.install_rust_environment()
+
+            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            self.assertEqual(
+                commands,
+                [[
+                    str(rustup), "component", "add", "--toolchain", "stable",
+                    "rustfmt", "clippy",
+                ]],
+            )
+            self.assertEqual(self.bootstrap.failures, [])
+
     def test_fresh_rustup_install_skips_redundant_immediate_update(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -746,6 +827,18 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.bootstrap.install_r2pipe_for_pwndbg())
         self.bootstrap.run.assert_not_called()
 
+    def test_r2pipe_health_probe_is_cached_within_one_run(self):
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["python3"], 0, stdout="/target/r2pipe/__init__.py\n", stderr=""
+            )
+        )
+
+        self.assertTrue(self.bootstrap.r2pipe_target_available())
+        self.assertTrue(self.bootstrap.r2pipe_target_available())
+
+        self.bootstrap.run.assert_called_once()
+
     def test_pwndbg_bridge_configuration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -772,6 +865,48 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("import r2pipe as _init_r2pipe", bridge)
             self.assertIn('super().__init__("ghidra"', bridge)
             self.assertIn('gdb.execute(f"r2pipe pdg @', bridge)
+
+    def test_healthy_pwndbg_backend_skips_remote_installer(self):
+        self.bootstrap.pwndbg_backend_available = mock.Mock(return_value=True)
+        self.bootstrap.download_installer = mock.Mock()
+
+        self.bootstrap.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
+
+        self.bootstrap.download_installer.assert_not_called()
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_broken_existing_pwndbg_backend_is_reinstalled_and_rechecked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installer = Path(directory) / "pwndbg-install.sh"
+            installer.touch()
+            self.bootstrap.pwndbg_backend_available = mock.Mock(
+                side_effect=[False, True]
+            )
+            self.bootstrap.download_installer = mock.Mock(return_value=installer)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["bash"], 0)
+            )
+
+            self.bootstrap.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
+
+            command = self.bootstrap.run.call_args.args[0]
+            self.assertEqual(command[:2], ["bash", str(installer)])
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_pwndbg_backend_probe_starts_python_and_is_cached(self):
+        self.bootstrap.find_command = mock.Mock(return_value="/usr/local/bin/pwndbg")
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["pwndbg"], 0, stdout="INIT_PWNDBG_OK\n", stderr=""
+            )
+        )
+
+        self.assertTrue(self.bootstrap.pwndbg_backend_available(["pwndbg", "pwndbg-gdb"]))
+        self.assertTrue(self.bootstrap.pwndbg_backend_available(["pwndbg", "pwndbg-gdb"]))
+
+        self.bootstrap.run.assert_called_once()
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertTrue(any("INIT_PWNDBG_OK" in argument for argument in command))
 
     def test_pwndbg_bridge_install_verifies_after_configuration(self):
         self.bootstrap.install_r2pipe_for_pwndbg = mock.Mock(return_value=True)
@@ -872,7 +1007,9 @@ class InstallerTests(unittest.TestCase):
 
             self.bootstrap.run = mock.Mock(side_effect=run)
             self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
-            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(
+                side_effect=[False, True]
+            )
             with (
                 mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination),
                 mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path),
@@ -890,6 +1027,37 @@ class InstallerTests(unittest.TestCase):
                 index_call.args[0], [str(command_path), "mirror", "update"]
             )
             self.bootstrap.install_command_wrapper.assert_called_once()
+            self.assertEqual(self.bootstrap.failures, [])
+
+    def test_glibc_missing_index_does_not_reinstall_healthy_python_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "glibc-all-in-one"
+            command_path = Path(directory) / "bin" / "glibc-aio"
+            destination.mkdir()
+            (destination / "pyproject.toml").touch()
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_index_available = mock.Mock(
+                side_effect=[False, True]
+            )
+            self.bootstrap.install_command_wrapper = mock.Mock()
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["glibc-aio"], 0)
+            )
+
+            with (
+                mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination),
+                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path),
+            ):
+                self.bootstrap.install_glibc_all_in_one()
+
+            self.bootstrap.run.assert_called_once_with(
+                [str(command_path), "mirror", "update"],
+                cwd=MODULE.HOME,
+                check=False,
+                network=True,
+                timeout=300,
+            )
+            self.bootstrap.install_command_wrapper.assert_not_called()
             self.assertEqual(self.bootstrap.failures, [])
 
     def test_glibc_all_in_one_v2_repairs_package_even_when_index_is_ready(self):
