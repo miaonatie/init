@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import platform
+import pwd
 import re
 import shlex
 import shutil
@@ -144,8 +145,56 @@ NVM_DIR = TOOLS_DIR / "nvm"
 NVM_URL = f"https://raw.githubusercontent.com/nvm-sh/nvm/v{NVM_VERSION}/install.sh"
 BASHRC = HOME / ".bashrc"
 ZSHRC = HOME / ".zshrc"
+VIMRC = HOME / ".vimrc"
 NVM_PROFILE_BEGIN = "# >>> init nvm/node >>>"
 NVM_PROFILE_END = "# <<< init nvm/node <<<"
+
+VIM_PROFILE_BEGIN = "\" >>> init vim defaults >>>"
+VIM_PROFILE_END = "\" <<< init vim defaults <<<"
+VIM_DEFAULTS = """set number
+set ruler
+set showcmd
+set tabstop=4
+set shiftwidth=4
+set softtabstop=4
+set expandtab
+set autoindent
+set smartindent
+set backspace=indent,eol,start
+set ignorecase
+set smartcase
+set incsearch
+set hlsearch
+syntax enable
+filetype plugin indent on"""
+
+OH_MY_ZSH_DIR = HOME / ".oh-my-zsh"
+OH_MY_ZSH_URL = "https://github.com/ohmyzsh/ohmyzsh.git"
+OH_MY_ZSH_PLUGIN_URLS = {
+    "zsh-autosuggestions": "https://github.com/zsh-users/zsh-autosuggestions.git",
+    "zsh-syntax-highlighting": "https://github.com/zsh-users/zsh-syntax-highlighting.git",
+}
+OH_MY_ZSH_PLUGINS = (
+    "git", "zsh-autosuggestions", "z", "extract", "web-search",
+    "zsh-syntax-highlighting",
+)
+
+FASTFETCH_RELEASE_URL = (
+    "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/"
+    "fastfetch-linux-{architecture}.deb"
+)
+FASTFETCH_ARCHITECTURES = {
+    "x86_64": "amd64",
+    "amd64": "amd64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+    "armv7l": "armv7l",
+    "i386": "i686",
+    "i686": "i686",
+    "ppc64le": "ppc64le",
+    "riscv64": "riscv64",
+    "s390x": "s390x",
+}
 
 RUSTUP_URL = "https://sh.rustup.rs"
 CARGO_HOME = HOME / ".cargo"
@@ -202,6 +251,8 @@ COMMAND_PROBE_ARGUMENTS = {
     "fd": ["--version"],
     "7z": ["i"],
     "hyfetch": ["--version"],
+    "neowofetch": ["--version"],
+    "fastfetch": ["--version"],
     "nasm": ["-v"],
     "yasm": ["--version"],
     "valgrind": ["--version"],
@@ -452,6 +503,12 @@ class Bootstrap:
         ]
 
     def require_sudo(self) -> None:
+        sudo_user = os.environ.get("SUDO_USER", "")
+        if os.geteuid() == 0 and sudo_user and sudo_user != "root":
+            raise RuntimeError(
+                "do not run this installer with sudo; run 'python3 init.py' as "
+                f"{sudo_user} so user-scoped tools and dotfiles belong to that user"
+            )
         if os.geteuid() == 0:
             self.warn("running as root; user-scoped tools will be installed under /root")
             return
@@ -676,6 +733,9 @@ class Bootstrap:
         if i386:
             self.apt_install(i386, "32-bit development support", required=True)
         self.install_command_links()
+        self.install_fastfetch()
+        self.configure_vim()
+        self.install_oh_my_zsh()
         self.install_docker()
 
     @staticmethod
@@ -712,6 +772,366 @@ class Bootstrap:
             )
             if result.returncode != 0:
                 self.skipped.append(f"command link failed: {target}")
+
+    def fastfetch_ready(self) -> bool:
+        executable = self.find_command(["fastfetch"])
+        return bool(executable) and self.executable_usable(executable, ["--version"])
+
+    def install_fastfetch(self) -> None:
+        if self.fastfetch_ready():
+            self.ok("Fastfetch backend for HyFetch: already installed")
+            return
+
+        if self.package_available("fastfetch"):
+            if self.package_installed("fastfetch"):
+                if not self.apt_update():
+                    self.failures.append(
+                        "Fastfetch repair skipped because APT update failed"
+                    )
+                    return
+                self.info("Fastfetch package is present but unusable; reinstalling it once")
+                repair = self.run(
+                    [
+                        "apt-get", *self.apt_options(), "install", "-y", "--reinstall",
+                        "--no-install-recommends", "fastfetch",
+                    ],
+                    sudo=True,
+                    check=False,
+                    env=self.apt_env(),
+                    timeout=300,
+                )
+                self._package_cache.clear()
+                if repair.returncode != 0:
+                    self.failures.append("Fastfetch package repair failed")
+                    return
+            elif not self.apt_install(
+                ["fastfetch"], "Fastfetch backend for HyFetch", required=True
+            ):
+                return
+        else:
+            release_arch = FASTFETCH_ARCHITECTURES.get(self.arch)
+            if release_arch is None:
+                self.failures.append(
+                    f"Fastfetch installation unsupported on architecture: {self.arch}"
+                )
+                return
+            package_path: Path | None = None
+            try:
+                handle = tempfile.NamedTemporaryFile(
+                    prefix="init-fastfetch-", suffix=".deb", delete=False
+                )
+                handle.close()
+                package_path = Path(handle.name)
+                url = FASTFETCH_RELEASE_URL.format(architecture=release_arch)
+                self.info(
+                    "Fastfetch is unavailable from APT; installing the official "
+                    f"GitHub release for {release_arch}"
+                )
+                download = self.run(
+                    [
+                        "curl", "-fL", "--connect-timeout", "30",
+                        "--max-time", "180",
+                        "-o", str(package_path), url,
+                    ],
+                    check=False,
+                    network=True,
+                    timeout=240,
+                )
+                if download.returncode != 0:
+                    self.failures.append("Fastfetch release download failed")
+                    return
+                metadata = self.run(
+                    [
+                        "dpkg-deb", "--field", str(package_path),
+                        "Package", "Architecture",
+                    ],
+                    check=False,
+                    capture=True,
+                    timeout=30,
+                )
+                fields = (metadata.stdout or "").split()
+                system_arch = self.run(
+                    ["dpkg", "--print-architecture"],
+                    check=False,
+                    capture=True,
+                    timeout=30,
+                ).stdout.strip()
+                if (
+                    metadata.returncode != 0
+                    or "fastfetch" not in fields
+                    or system_arch not in fields
+                ):
+                    self.failures.append(
+                        "Fastfetch release package failed metadata verification"
+                    )
+                    return
+                install = self.run(
+                    [
+                        "apt-get", *self.apt_options(), "install", "-y",
+                        "--no-install-recommends", str(package_path),
+                    ],
+                    sudo=True,
+                    check=False,
+                    env=self.apt_env(),
+                    timeout=300,
+                )
+                self._package_cache.clear()
+                if install.returncode != 0:
+                    self.failures.append("Fastfetch release installation failed")
+                    return
+            finally:
+                if package_path is not None:
+                    try:
+                        package_path.unlink()
+                    except OSError:
+                        pass
+
+        self._extend_path()
+        if self.fastfetch_ready():
+            self.ok("Fastfetch backend for HyFetch installed and launch-verified")
+        else:
+            self.failures.append("Fastfetch installation failed launch verification")
+
+    def configure_vim(self) -> None:
+        try:
+            changed = self.update_managed_block(
+                VIMRC,
+                VIM_PROFILE_BEGIN,
+                VIM_PROFILE_END,
+                VIM_DEFAULTS,
+            )
+        except OSError as exc:
+            self.failures.append(f"Vim configuration failed: {exc}")
+            return
+        status = "configured" if changed else "already configured"
+        self.ok(f"Vim defaults: {status} ({VIMRC})")
+
+    @staticmethod
+    def vim_config_ready() -> bool:
+        try:
+            content = VIMRC.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return (
+            VIM_PROFILE_BEGIN in content
+            and VIM_PROFILE_END in content
+            and all(line in content for line in VIM_DEFAULTS.splitlines())
+        )
+
+    def clone_or_update_at(
+        self,
+        name: str,
+        url: str,
+        destination: Path,
+        *,
+        update: bool = False,
+    ) -> bool:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
+        if (destination / ".git").exists():
+            if update:
+                self.info(f"{name}: updating the managed checkout")
+                result = self.run(
+                    ["git", "-C", str(destination), "pull", "--ff-only"],
+                    env=env,
+                    check=False,
+                    network=True,
+                    timeout=300,
+                )
+                if result.returncode != 0:
+                    self.warn(f"{name}: update failed; using the existing checkout")
+                    self.skipped.append(f"repository update failed: {name}")
+            else:
+                self.ok(f"{name}: already installed")
+            return True
+        if destination.exists():
+            self.failures.append(f"path exists but is not a Git repository: {destination}")
+            return False
+        result = self.run(
+            ["git", "clone", "--depth", "1", url, str(destination)],
+            env=env,
+            check=False,
+            network=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            self.failures.append(f"repository clone failed: {name}")
+            return False
+        return True
+
+    @staticmethod
+    def zsh_plugin_tokens(body: str) -> list[str]:
+        tokens: list[str] = []
+        for line in body.splitlines():
+            line = line.split("#", 1)[0]
+            tokens.extend(re.findall(r"[A-Za-z0-9_.-]+", line))
+        return tokens
+
+    def configure_oh_my_zsh_rc(self) -> bool:
+        try:
+            existing = ZSHRC.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            existing = ""
+
+        zsh_line = 'export ZSH="$HOME/.oh-my-zsh"'
+        zsh_pattern = re.compile(r"(?m)^[ \t]*(?:export[ \t]+)?ZSH=.*$")
+        if zsh_pattern.search(existing):
+            updated = zsh_pattern.sub(zsh_line, existing, count=1)
+        else:
+            updated = zsh_line + ("\n\n" + existing.lstrip("\n") if existing else "\n")
+
+        if not re.search(r"(?m)^[ \t]*ZSH_THEME=", updated):
+            updated = updated.replace(zsh_line, zsh_line + '\nZSH_THEME="robbyrussell"', 1)
+
+        plugin_pattern = re.compile(r"(?ms)^[ \t]*plugins=\((.*?)\)")
+        match = plugin_pattern.search(updated)
+        current = self.zsh_plugin_tokens(match.group(1)) if match else []
+        plugins = list(dict.fromkeys([*current, *OH_MY_ZSH_PLUGINS]))
+        plugins = [name for name in plugins if name != "zsh-syntax-highlighting"]
+        plugins.append("zsh-syntax-highlighting")
+        plugin_block = "plugins=(\n" + "".join(f"  {name}\n" for name in plugins) + ")"
+        if match:
+            updated = plugin_pattern.sub(plugin_block, updated, count=1)
+        else:
+            theme = re.search(r"(?m)^[ \t]*ZSH_THEME=.*$", updated)
+            insert_at = theme.end() if theme else len(zsh_line)
+            updated = updated[:insert_at] + "\n" + plugin_block + updated[insert_at:]
+
+        source_pattern = re.compile(
+            r'(?m)^[ \t]*(?:source|\.)[ \t]+["\']?\$\{?ZSH\}?/oh-my-zsh\.sh["\']?[ \t]*$'
+        )
+        if not source_pattern.search(updated):
+            updated = updated.rstrip("\n") + '\n\nsource "$ZSH/oh-my-zsh.sh"\n'
+
+        alias_pattern = re.compile(r"(?m)^[ \t]*alias[ \t]+py=.*$")
+        if alias_pattern.search(updated):
+            updated = alias_pattern.sub("alias py='python'", updated, count=1)
+        else:
+            updated = updated.rstrip("\n") + "\n\nalias py='python'\n"
+        return self.write_text_if_changed(ZSHRC, updated.rstrip("\n") + "\n")
+
+    def configure_default_zsh(self) -> bool:
+        try:
+            account = pwd.getpwuid(os.getuid())
+        except KeyError:
+            self.failures.append("could not determine the current login account")
+            return False
+        zsh = self.find_command(["zsh"])
+        if zsh is None:
+            self.failures.append("zsh is unavailable")
+            return False
+        if Path(account.pw_shell).name == Path(zsh).name:
+            return True
+        result = self.run(
+            ["usermod", "--shell", zsh, account.pw_name],
+            sudo=True,
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            self.failures.append(
+                f"failed to set zsh as the default shell for {account.pw_name}"
+            )
+            return False
+        return True
+
+    def restore_missing_git_file(self, repository: Path, relative_path: str) -> bool:
+        destination = repository / relative_path
+        if destination.is_file():
+            return True
+        self.warn(f"restoring missing managed file: {destination}")
+        result = self.run(
+            [
+                "git", "-C", str(repository), "restore", "--source=HEAD",
+                "--worktree", "--", relative_path,
+            ],
+            check=False,
+            timeout=30,
+        )
+        return result.returncode == 0 and destination.is_file()
+
+    def install_oh_my_zsh(self) -> None:
+        if not self.clone_or_update_at(
+            "Oh My Zsh",
+            OH_MY_ZSH_URL,
+            OH_MY_ZSH_DIR,
+            update=self.update_existing,
+        ):
+            return
+        if not self.restore_missing_git_file(OH_MY_ZSH_DIR, "oh-my-zsh.sh"):
+            self.failures.append("Oh My Zsh checkout is incomplete")
+            return
+
+        custom_dir = OH_MY_ZSH_DIR / "custom" / "plugins"
+        for name, url in OH_MY_ZSH_PLUGIN_URLS.items():
+            if not self.clone_or_update_at(
+                name,
+                url,
+                custom_dir / name,
+                update=self.update_existing,
+            ):
+                return
+        plugin_files = (
+            (
+                custom_dir / "zsh-autosuggestions",
+                "zsh-autosuggestions.plugin.zsh",
+            ),
+            (
+                custom_dir / "zsh-syntax-highlighting",
+                "zsh-syntax-highlighting.plugin.zsh",
+            ),
+        )
+        if not all(
+            self.restore_missing_git_file(repository, relative_path)
+            for repository, relative_path in plugin_files
+        ):
+            self.failures.append("Oh My Zsh plugin checkout is incomplete")
+            return
+        try:
+            changed = self.configure_oh_my_zsh_rc()
+        except OSError as exc:
+            self.failures.append(f"Oh My Zsh shell configuration failed: {exc}")
+            return
+        if not self.configure_default_zsh():
+            return
+        status = "configured" if changed else "already configured"
+        self.ok(
+            f"Oh My Zsh and plugins: {status}; zsh is the default shell for "
+            f"{pwd.getpwuid(os.getuid()).pw_name}"
+        )
+
+    def oh_my_zsh_ready(self) -> bool:
+        required_files = [
+            OH_MY_ZSH_DIR / "oh-my-zsh.sh",
+            *(
+                OH_MY_ZSH_DIR / "custom" / "plugins" / name / f"{name}.plugin.zsh"
+                for name in OH_MY_ZSH_PLUGIN_URLS
+            ),
+        ]
+        if not all(path.is_file() for path in required_files):
+            return False
+        try:
+            content = ZSHRC.read_text(encoding="utf-8")
+            account = pwd.getpwuid(os.getuid())
+        except (OSError, KeyError):
+            return False
+        plugin_match = re.search(r"(?ms)^[ \t]*plugins=\((.*?)\)", content)
+        if plugin_match is None:
+            return False
+        plugins = self.zsh_plugin_tokens(plugin_match.group(1))
+        source_present = bool(re.search(
+            r'(?m)^[ \t]*(?:source|\.)[ \t]+["\']?\$\{?ZSH\}?/oh-my-zsh\.sh["\']?[ \t]*$',
+            content,
+        ))
+        return (
+            all(name in plugins for name in OH_MY_ZSH_PLUGINS)
+            and plugins[-1:] == ["zsh-syntax-highlighting"]
+            and source_present
+            and bool(re.search(
+                r"(?m)^[ \t]*alias[ \t]+py=['\"]python['\"][ \t]*$", content
+            ))
+            and Path(account.pw_shell).name == "zsh"
+        )
 
     def docker_repository(self) -> tuple[str, str]:
         if self.distro["id"] == "kali":
@@ -2232,39 +2652,12 @@ except gdb.error:
         self.ok("Rust stable, Cargo, rustfmt and Clippy installed with rustup")
 
     def clone_or_update(self, name: str, url: str, *, update: bool = False) -> bool:
-        destination = TOOLS_DIR / name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        env = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"}
-        if (destination / ".git").exists():
-            if update:
-                self.info(f"{name}: updating the managed checkout")
-                result = self.run(
-                    ["git", "-C", str(destination), "pull", "--ff-only"],
-                    env=env,
-                    check=False,
-                    network=True,
-                    timeout=300,
-                )
-                if result.returncode != 0:
-                    self.warn(f"{name}: update failed; using the existing checkout")
-                    self.skipped.append(f"repository update failed: {name}")
-            else:
-                self.ok(f"{name}: already installed")
-            return True
-        if destination.exists():
-            self.failures.append(f"path exists but is not a Git repository: {destination}")
-            return False
-        result = self.run(
-            ["git", "clone", "--depth", "1", url, str(destination)],
-            env=env,
-            check=False,
-            network=True,
-            timeout=300,
+        return self.clone_or_update_at(
+            name,
+            url,
+            TOOLS_DIR / name,
+            update=update,
         )
-        if result.returncode != 0:
-            self.failures.append(f"repository clone failed: {name}")
-            return False
-        return True
 
     def install_helper_repositories(self) -> None:
         for name, url in HELPER_REPOS.items():
@@ -2594,6 +2987,8 @@ except gdb.error:
             ("fd", ["fd"]),
             ("7z", ["7z"]),
             ("hyfetch", ["hyfetch"]),
+            ("neowofetch", ["neowofetch"]),
+            ("fastfetch", ["fastfetch"]),
             ("nasm", ["nasm"]),
             ("yasm", ["yasm"]),
             ("valgrind", ["valgrind"]),
@@ -2634,6 +3029,27 @@ except gdb.error:
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
+
+        if self.vim_config_ready():
+            self.ok(f"Vim defaults: {VIMRC}")
+        else:
+            ok_all = False
+            message = "verification failed: managed Vim defaults unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.oh_my_zsh_ready():
+            self.ok(
+                "Oh My Zsh, autosuggestions, syntax highlighting, plugins, "
+                "py alias and default shell"
+            )
+        else:
+            ok_all = False
+            message = "verification failed: Oh My Zsh environment unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
 
         radare2_version = self.radare2_version()
         if radare2_version is not None and radare2_version >= RADARE2_MIN_VERSION:

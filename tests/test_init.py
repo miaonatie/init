@@ -436,6 +436,9 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.enable_i386 = mock.Mock(return_value=list(MODULE.I386_APT))
         self.bootstrap.apt_install = mock.Mock(return_value=True)
         self.bootstrap.install_command_links = mock.Mock()
+        self.bootstrap.install_fastfetch = mock.Mock()
+        self.bootstrap.configure_vim = mock.Mock()
+        self.bootstrap.install_oh_my_zsh = mock.Mock()
         self.bootstrap.install_docker = mock.Mock()
         self.bootstrap.install_system_foundation()
         calls = self.bootstrap.apt_install.call_args_list
@@ -449,6 +452,158 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(calls[1].args[0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
         self.assertEqual(calls[2].args[0], MODULE.CTF_APT)
         self.assertEqual(calls[3].args[0], MODULE.I386_APT)
+        self.bootstrap.install_fastfetch.assert_called_once_with()
+        self.bootstrap.configure_vim.assert_called_once_with()
+        self.bootstrap.install_oh_my_zsh.assert_called_once_with()
+
+    def test_healthy_fastfetch_skips_package_and_network_work(self):
+        self.bootstrap.fastfetch_ready = mock.Mock(return_value=True)
+        self.bootstrap.package_available = mock.Mock()
+        self.bootstrap.apt_install = mock.Mock()
+        self.bootstrap.run = mock.Mock()
+
+        self.bootstrap.install_fastfetch()
+
+        self.bootstrap.package_available.assert_not_called()
+        self.bootstrap.apt_install.assert_not_called()
+        self.bootstrap.run.assert_not_called()
+
+    def test_fastfetch_release_is_arch_checked_and_installed_once(self):
+        self.bootstrap.arch = "x86_64"
+        self.bootstrap.fastfetch_ready = mock.Mock(side_effect=[False, True])
+        self.bootstrap.package_available = mock.Mock(return_value=False)
+
+        def run(command, **_kwargs):
+            if command[:2] == ["dpkg-deb", "--field"]:
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    stdout="Package: fastfetch\nArchitecture: amd64\n",
+                    stderr="",
+                )
+            if command == ["dpkg", "--print-architecture"]:
+                return subprocess.CompletedProcess(command, 0, stdout="amd64\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        self.bootstrap.run = mock.Mock(side_effect=run)
+        self.bootstrap.install_fastfetch()
+
+        commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+        curl = next(command for command in commands if command[0] == "curl")
+        self.assertIn(
+            "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/"
+            "fastfetch-linux-amd64.deb",
+            curl,
+        )
+        self.assertNotIn("--retry", curl)
+        installs = [command for command in commands if command[0] == "apt-get"]
+        self.assertEqual(len(installs), 1)
+        self.assertIn("--no-install-recommends", installs[0])
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_broken_fastfetch_package_is_reinstalled_once(self):
+        self.bootstrap.fastfetch_ready = mock.Mock(side_effect=[False, True])
+        self.bootstrap.package_available = mock.Mock(return_value=True)
+        self.bootstrap.package_installed = mock.Mock(return_value=True)
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(["apt-get"], 0)
+        )
+
+        self.bootstrap.install_fastfetch()
+
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("--reinstall", command)
+        self.assertEqual(command[-1], "fastfetch")
+        self.assertEqual(self.bootstrap.run.call_count, 1)
+        self.assertEqual(self.bootstrap.failures, [])
+
+    def test_vim_configuration_preserves_user_settings_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            vimrc = Path(directory) / ".vimrc"
+            vimrc.write_text("set relativenumber\n", encoding="utf-8")
+            with mock.patch.object(MODULE, "VIMRC", vimrc):
+                self.bootstrap.configure_vim()
+                first = vimrc.read_text(encoding="utf-8")
+                self.bootstrap.configure_vim()
+                second = vimrc.read_text(encoding="utf-8")
+                self.assertTrue(self.bootstrap.vim_config_ready())
+
+        self.assertEqual(first, second)
+        self.assertIn("set relativenumber", first)
+        self.assertEqual(first.count(MODULE.VIM_PROFILE_BEGIN), 1)
+        self.assertIn("set tabstop=4", first)
+        self.assertIn("set shiftwidth=4", first)
+        self.assertIn("set expandtab", first)
+        self.assertIn("set autoindent", first)
+
+    def test_oh_my_zsh_configuration_merges_plugins_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            zshrc = Path(directory) / ".zshrc"
+            zshrc.write_text(
+                "export CUSTOM_SETTING=1\n"
+                "plugins=(git docker)\n"
+                "source \"$ZSH/oh-my-zsh.sh\"\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(MODULE, "ZSHRC", zshrc):
+                self.assertTrue(self.bootstrap.configure_oh_my_zsh_rc())
+                first = zshrc.read_text(encoding="utf-8")
+                self.assertFalse(self.bootstrap.configure_oh_my_zsh_rc())
+                second = zshrc.read_text(encoding="utf-8")
+
+        self.assertEqual(first, second)
+        self.assertIn("export CUSTOM_SETTING=1", first)
+        match = MODULE.re.search(r"(?ms)^\s*plugins=\((.*?)\)", first)
+        self.assertIsNotNone(match)
+        plugins = self.bootstrap.zsh_plugin_tokens(match.group(1))
+        self.assertIn("docker", plugins)
+        self.assertTrue(set(MODULE.OH_MY_ZSH_PLUGINS) <= set(plugins))
+        self.assertEqual(plugins[-1], "zsh-syntax-highlighting")
+        self.assertEqual(first.count("source \"$ZSH/oh-my-zsh.sh\""), 1)
+        self.assertEqual(first.count("alias py='python'"), 1)
+
+    def test_oh_my_zsh_health_probe_checks_files_config_and_default_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            omz = root / ".oh-my-zsh"
+            custom = omz / "custom" / "plugins"
+            (omz / "oh-my-zsh.sh").parent.mkdir(parents=True)
+            (omz / "oh-my-zsh.sh").touch()
+            for name in MODULE.OH_MY_ZSH_PLUGIN_URLS:
+                path = custom / name / f"{name}.plugin.zsh"
+                path.parent.mkdir(parents=True)
+                path.touch()
+            zshrc = root / ".zshrc"
+            with (
+                mock.patch.object(MODULE, "OH_MY_ZSH_DIR", omz),
+                mock.patch.object(MODULE, "ZSHRC", zshrc),
+                mock.patch.object(
+                    MODULE.pwd,
+                    "getpwuid",
+                    return_value=mock.Mock(pw_shell="/usr/bin/zsh"),
+                ),
+            ):
+                self.bootstrap.configure_oh_my_zsh_rc()
+                self.assertTrue(self.bootstrap.oh_my_zsh_ready())
+
+    def test_default_zsh_is_not_reconfigured_when_already_selected(self):
+        self.bootstrap.find_command = mock.Mock(return_value="/usr/bin/zsh")
+        self.bootstrap.run = mock.Mock()
+        with mock.patch.object(
+            MODULE.pwd,
+            "getpwuid",
+            return_value=mock.Mock(pw_shell="/bin/zsh", pw_name="alice"),
+        ):
+            self.assertTrue(self.bootstrap.configure_default_zsh())
+        self.bootstrap.run.assert_not_called()
+
+    def test_sudo_entry_is_rejected_before_root_owned_dotfiles_are_created(self):
+        with (
+            mock.patch.object(MODULE.os, "geteuid", return_value=0),
+            mock.patch.dict(MODULE.os.environ, {"SUDO_USER": "alice"}, clear=False),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "do not run.*with sudo"):
+                self.bootstrap.require_sudo()
 
     def test_color_output_when_enabled(self):
         self.bootstrap.color = True
@@ -471,6 +626,17 @@ class InstallerTests(unittest.TestCase):
             "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.7/install.sh",
         )
         self.assertEqual(MODULE.RUSTUP_URL, "https://sh.rustup.rs")
+        self.assertEqual(
+            MODULE.OH_MY_ZSH_URL,
+            "https://github.com/ohmyzsh/ohmyzsh.git",
+        )
+        self.assertEqual(
+            set(MODULE.OH_MY_ZSH_PLUGIN_URLS.values()),
+            {
+                "https://github.com/zsh-users/zsh-autosuggestions.git",
+                "https://github.com/zsh-users/zsh-syntax-highlighting.git",
+            },
+        )
 
     def test_node_and_rust_shell_configuration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
