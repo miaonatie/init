@@ -168,11 +168,7 @@ filetype plugin indent on"""
 TMUX_PROFILE_BEGIN = "# >>> init tmux defaults >>>"
 TMUX_PROFILE_END = "# <<< init tmux defaults <<<"
 TMUX_DEFAULTS = """set -g mouse on
-set -g history-limit 100000
-set -sg escape-time 0
-set -g base-index 1
-setw -g pane-base-index 1
-set -g renumber-windows on"""
+set -g history-limit 50000"""
 
 OH_MY_ZSH_DIR = HOME / ".oh-my-zsh"
 OH_MY_ZSH_URL = "https://github.com/ohmyzsh/ohmyzsh.git"
@@ -328,7 +324,8 @@ class Bootstrap:
         self._r2ghidra_available_cache: bool | None = None
         self._r2pipe_available_cache: bool | None = None
         self._uv_tool_dir_cache: Path | None = None
-        self._gdb_python_version_cache: str | None = None
+        self._gdb_python_abi_cache: tuple[str, str] | None = None
+        self._gdb_python_target_cache: str | None = None
         self._glibc_runtime_cache: bool | None = None
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
@@ -1816,13 +1813,17 @@ class Bootstrap:
             return None
         return tool_dir / PWNDBG_TOOL_NAME / "share" / "pwndbg" / "gdbinit.py"
 
-    def gdb_python_version(self) -> str | None:
-        if self._gdb_python_version_cache is not None:
-            return self._gdb_python_version_cache
+    def gdb_python_abi(self) -> tuple[str, str] | None:
+        if self._gdb_python_abi_cache is not None:
+            return self._gdb_python_abi_cache
         result = self.run(
             [
                 "gdb", "-nx", "--batch",
-                "-iex", "py import sysconfig; print(sysconfig.get_config_var('VERSION'))",
+                "-iex", (
+                    "py import sysconfig; "
+                    "print(str(sysconfig.get_config_var('VERSION') or '') + '\\t' + "
+                    "str(sysconfig.get_config_var('INSTSONAME') or ''))"
+                ),
             ],
             check=False,
             capture=True,
@@ -1831,34 +1832,74 @@ class Bootstrap:
         if result.returncode != 0:
             return None
         for line in reversed((result.stdout or "").splitlines()):
-            version = line.strip()
-            if re.fullmatch(r"3\.\d+", version):
-                self._gdb_python_version_cache = version
-                return version
+            parts = line.strip().split("\t", 1)
+            if len(parts) == 2 and re.fullmatch(r"3\.\d+", parts[0]) and parts[1]:
+                self._gdb_python_abi_cache = (parts[0], parts[1])
+                return self._gdb_python_abi_cache
         return None
 
-    def pwndbg_uv_environment_available(self) -> bool:
+    def gdb_python_install_target(self) -> str | None:
+        if self._gdb_python_target_cache is not None:
+            return self._gdb_python_target_cache
+        abi = self.gdb_python_abi()
+        if abi is None:
+            return None
+        version, instsoname = abi
+        candidates = [Path(f"/usr/bin/python{version}")]
+        found = shutil.which(f"python{version}")
+        if found:
+            candidates.append(Path(found))
+        seen: set[Path] = set()
+        for candidate in candidates:
+            candidate = candidate.resolve()
+            if candidate in seen or not candidate.is_file() or not os.access(candidate, os.X_OK):
+                continue
+            seen.add(candidate)
+            result = self.run(
+                [
+                    str(candidate), "-c",
+                    "import sysconfig; "
+                    "print(str(sysconfig.get_config_var('VERSION') or '') + '\\t' + "
+                    "str(sysconfig.get_config_var('INSTSONAME') or ''))",
+                ],
+                check=False,
+                capture=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and (result.stdout or "").strip() == (
+                f"{version}\t{instsoname}"
+            ):
+                self._gdb_python_target_cache = str(candidate)
+                return self._gdb_python_target_cache
+        self._gdb_python_target_cache = version
+        return self._gdb_python_target_cache
+
+    def pwndbg_tool_python(self) -> Path | None:
+        tool_dir = self.uv_tool_dir()
+        if tool_dir is None:
+            return None
+        executable = tool_dir / PWNDBG_TOOL_NAME / "bin" / "python"
+        return executable if executable.is_file() and os.access(executable, os.X_OK) else None
+
+    def pwndbg_uv_packages_available(self) -> bool:
         if self._pwndbg_uv_cache is not None:
             return self._pwndbg_uv_cache
         gdbinit = self.pwndbg_gdbinit_path()
-        if gdbinit is None or not gdbinit.is_file():
+        python = self.pwndbg_tool_python()
+        if gdbinit is None or not gdbinit.is_file() or python is None:
             self._pwndbg_uv_cache = False
             return False
         probe = self.run(
             [
-                "gdb", "-nx", "-q", "--batch",
-                "-ex", f"source {gdbinit}",
-                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
-                "-ex", (
-                    "pi import r2pipe; from importlib.metadata import version; "
+                str(python), "-c", (
+                    "import r2pipe; from importlib.metadata import version; "
                     "print('INIT_PWNDBG_VERSION=' + version('pwndbg')); "
                     "print('INIT_R2PIPE_OK=' + version('r2pipe'))"
                 ),
-                "/bin/true",
             ],
             check=False,
             capture=True,
-            timeout=120,
+            timeout=30,
         )
         output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         version_match = re.search(r"init_pwndbg_version=([0-9]+(?:\.[0-9]+)+)", output)
@@ -1870,7 +1911,6 @@ class Bootstrap:
         )
         self._pwndbg_uv_cache = (
             probe.returncode == 0
-            and "init_pwndbg_ok" in output
             and detected_version == expected_version
             and f"init_r2pipe_ok={R2PIPE_VERSION}" in output
             and "traceback" not in output
@@ -1883,7 +1923,7 @@ class Bootstrap:
         if (
             not self.update_existing
             and not force
-            and self.pwndbg_uv_environment_available()
+            and self.pwndbg_uv_packages_available()
             and self.find_command(["pwndbg"]) is not None
         ):
             self.ok(
@@ -1892,29 +1932,33 @@ class Bootstrap:
             )
             return True
 
-        python_version = self.gdb_python_version()
-        if python_version is None:
+        python_target = self.gdb_python_install_target()
+        if python_target is None:
             self.failures.append(
-                "Pwndbg installation failed: could not determine system GDB's Python version"
+                "Pwndbg installation failed: could not determine system GDB's Python ABI"
             )
             return False
         executable = self.uv_executable()
         assert executable is not None
         command = [
             executable, "tool", "install",
-            "--python", python_version,
+            "--python", python_target,
             "--with", f"r2pipe=={R2PIPE_VERSION}",
         ]
-        if force or self.update_existing or self.pwndbg_gdbinit_path() is not None:
+        existing_gdbinit = self.pwndbg_gdbinit_path()
+        if self.update_existing:
             command.extend(["--upgrade", "--reinstall"])
+        elif force or (existing_gdbinit is not None and existing_gdbinit.is_file()):
+            command.append("--reinstall")
         command.append(PWNDBG_UV_SPEC)
         self.info(
             f"installing Pwndbg {PWNDBG_VERSION} for system GDB "
-            f"Python {python_version} with uv"
+            f"with uv using {python_target}"
         )
         result = self.run(
             command,
             check=False,
+            capture=True,
             network=True,
             timeout=900,
         )
@@ -1922,9 +1966,19 @@ class Bootstrap:
         self._pwndbg_uv_cache = None
         self._pwndbg_backend_cache = None
         self._r2pipe_available_cache = None
-        if result.returncode != 0 or not self.pwndbg_uv_environment_available():
+        if result.returncode != 0:
+            details = [
+                line.strip()
+                for line in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
+                if line.strip()
+            ]
+            suffix = f": {' | '.join(details[-3:])[:400]}" if details else ""
+            self.failures.append("Pwndbg uv installation failed" + suffix)
+            return False
+        if not self.pwndbg_uv_packages_available():
             self.failures.append(
-                "Pwndbg uv installation failed: Pwndbg or r2pipe could not load in system GDB"
+                "Pwndbg uv installation failed: Pwndbg or r2pipe package unavailable "
+                "inside the uv tool environment"
             )
             return False
         self.ok(
@@ -1936,7 +1990,7 @@ class Bootstrap:
     def r2pipe_target_available(self) -> bool:
         if self._r2pipe_available_cache is not None:
             return self._r2pipe_available_cache
-        self._r2pipe_available_cache = self.pwndbg_uv_environment_available()
+        self._r2pipe_available_cache = self.pwndbg_uv_packages_available()
         return self._r2pipe_available_cache
 
     @staticmethod
@@ -2393,7 +2447,7 @@ except gdb.error:
     def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
         if self._pwndbg_probe_cache is not None:
             return self._pwndbg_probe_cache
-        if not self.pwndbg_uv_environment_available():
+        if not self.pwndbg_uv_packages_available():
             self._pwndbg_probe_cache = subprocess.CompletedProcess(
                 ["gdb"], 1, "", "Pwndbg uv environment unavailable"
             )
@@ -2496,6 +2550,8 @@ except gdb.error:
                 line for line in details
                 if any(marker in line.lower() for marker in (
                     "ghidra", "r2pipe", "traceback", "error", "failed",
+                    "importerror", "modulenotfounderror", "undefined symbol",
+                    "cannot find", "no such file",
                 ))
             ]
             selected = (useful or details)[-3:]
@@ -3082,8 +3138,20 @@ except gdb.error:
     def pwndbg_backend_available(self) -> bool:
         if self._pwndbg_backend_cache is not None:
             return self._pwndbg_backend_cache
+        if self._pwndbg_probe_cache is not None:
+            output = (
+                (self._pwndbg_probe_cache.stdout or "")
+                + (self._pwndbg_probe_cache.stderr or "")
+            ).lower()
+            self._pwndbg_backend_cache = (
+                self._pwndbg_probe_cache.returncode == 0
+                and "init_pwndbg_ok" in output
+                and "init_r2pipe_ok=" in output
+                and "traceback" not in output
+            )
+            return self._pwndbg_backend_cache
         if (
-            not self.pwndbg_uv_environment_available()
+            not self.pwndbg_uv_packages_available()
             or not self.pwndbg_system_gdb_configured()
         ):
             self._pwndbg_backend_cache = False
@@ -3336,7 +3404,8 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        if self.r2pipe_target_available():
+        pwndbg_packages_ok = self.r2pipe_target_available()
+        if pwndbg_packages_ok:
             self.ok(
                 f"Pwndbg r2pipe {R2PIPE_VERSION}: included in the uv tool environment"
             )
@@ -3347,23 +3416,24 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        if self.pwndbg_backend_available():
-            self.ok("system GDB automatically loads uv-managed Pwndbg")
-        else:
-            ok_all = False
-            message = "verification failed: system GDB Pwndbg auto-load unavailable"
-            if message not in self.failures:
-                self.failures.append(message)
-            self.error(message)
-
-        if self.pwndbg_r2ghidra_available():
-            self.ok("Pwndbg r2ghidra integration and ghidra command")
-        else:
-            ok_all = False
-            message = "verification failed: Pwndbg r2ghidra integration unavailable"
-            if message not in self.failures:
-                self.failures.append(message)
-            self.error(message)
+        if pwndbg_packages_ok:
+            pwndbg_backend_ok = self.pwndbg_backend_available()
+            if pwndbg_backend_ok:
+                self.ok("system GDB automatically loads uv-managed Pwndbg")
+                if self.pwndbg_r2ghidra_available():
+                    self.ok("Pwndbg r2ghidra integration and ghidra command")
+                else:
+                    ok_all = False
+                    message = "verification failed: Pwndbg r2ghidra integration unavailable"
+                    if message not in self.failures:
+                        self.failures.append(message)
+                    self.error(message)
+            else:
+                ok_all = False
+                message = "verification failed: system GDB Pwndbg auto-load unavailable"
+                if message not in self.failures:
+                    self.failures.append(message)
+                self.error(message)
 
         node_probe = self.node_environment_probe()
         node_output = (node_probe.stdout or "").lower()

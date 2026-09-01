@@ -567,11 +567,10 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("setw -g mode-keys vi", first)
         self.assertEqual(first.count(MODULE.TMUX_PROFILE_BEGIN), 1)
         self.assertIn("set -g mouse on", first)
-        self.assertIn("set -g history-limit 100000", first)
-        self.assertIn("set -sg escape-time 0", first)
-        self.assertIn("set -g base-index 1", first)
-        self.assertIn("setw -g pane-base-index 1", first)
-        self.assertIn("set -g renumber-windows on", first)
+        self.assertIn("set -g history-limit 50000", first)
+        self.assertNotIn("escape-time", first)
+        self.assertNotIn("base-index", first)
+        self.assertNotIn("renumber-windows", first)
         self.bootstrap.run.assert_called_once_with(
             ["/usr/bin/tmux", "source-file", str(tmux_conf)],
             check=False,
@@ -1020,10 +1019,12 @@ class InstallerTests(unittest.TestCase):
 
     def test_uv_install_includes_r2pipe_and_matches_system_gdb_python(self):
         self.bootstrap.install_uv = mock.Mock(return_value=True)
-        self.bootstrap.pwndbg_uv_environment_available = mock.Mock(
+        self.bootstrap.pwndbg_uv_packages_available = mock.Mock(
             side_effect=[False, True]
         )
-        self.bootstrap.gdb_python_version = mock.Mock(return_value="3.13")
+        self.bootstrap.gdb_python_install_target = mock.Mock(
+            return_value="/usr/bin/python3.13"
+        )
         self.bootstrap.uv_executable = mock.Mock(return_value="/home/test/.local/bin/uv")
         self.bootstrap.find_command = mock.Mock(return_value=None)
         self.bootstrap.pwndbg_gdbinit_path = mock.Mock(return_value=None)
@@ -1036,7 +1037,9 @@ class InstallerTests(unittest.TestCase):
         command = self.bootstrap.run.call_args.args[0]
         self.assertEqual(command[:3], ["/home/test/.local/bin/uv", "tool", "install"])
         self.assertIn("--python", command)
-        self.assertEqual(command[command.index("--python") + 1], "3.13")
+        self.assertEqual(
+            command[command.index("--python") + 1], "/usr/bin/python3.13"
+        )
         self.assertIn("--with", command)
         self.assertEqual(
             command[command.index("--with") + 1],
@@ -1044,10 +1047,11 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(command[-1], MODULE.PWNDBG_UV_SPEC)
         self.assertNotIn("pwndbg-gdb", " ".join(command))
+        self.assertTrue(self.bootstrap.run.call_args.kwargs["capture"])
 
     def test_healthy_uv_pwndbg_skips_network_install(self):
         self.bootstrap.install_uv = mock.Mock(return_value=True)
-        self.bootstrap.pwndbg_uv_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.find_command = mock.Mock(return_value="/home/test/.local/bin/pwndbg")
         self.bootstrap.run = mock.Mock()
 
@@ -1056,10 +1060,12 @@ class InstallerTests(unittest.TestCase):
 
     def test_forced_uv_pwndbg_repair_reinstalls(self):
         self.bootstrap.install_uv = mock.Mock(return_value=True)
-        self.bootstrap.pwndbg_uv_environment_available = mock.Mock(
+        self.bootstrap.pwndbg_uv_packages_available = mock.Mock(
             side_effect=[True, True]
         )
-        self.bootstrap.gdb_python_version = mock.Mock(return_value="3.13")
+        self.bootstrap.gdb_python_install_target = mock.Mock(
+            return_value="/usr/bin/python3.13"
+        )
         self.bootstrap.uv_executable = mock.Mock(return_value="uv")
         self.bootstrap.pwndbg_gdbinit_path = mock.Mock(
             return_value=Path("/tool/pwndbg/share/pwndbg/gdbinit.py")
@@ -1070,33 +1076,114 @@ class InstallerTests(unittest.TestCase):
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv(force=True))
         command = self.bootstrap.run.call_args.args[0]
-        self.assertIn("--upgrade", command)
+        self.assertNotIn("--upgrade", command)
         self.assertIn("--reinstall", command)
 
-    def test_pwndbg_uv_probe_sources_gdbinit_and_imports_r2pipe(self):
+    def test_broken_existing_uv_pwndbg_reinstalls_without_upgrading(self):
         with tempfile.TemporaryDirectory() as directory:
             gdbinit = Path(directory) / "gdbinit.py"
             gdbinit.touch()
+            self.bootstrap.install_uv = mock.Mock(return_value=True)
+            self.bootstrap.pwndbg_uv_packages_available = mock.Mock(
+                side_effect=[False, True]
+            )
+            self.bootstrap.gdb_python_install_target = mock.Mock(
+                return_value="/usr/bin/python3.13"
+            )
+            self.bootstrap.uv_executable = mock.Mock(return_value="uv")
+            self.bootstrap.find_command = mock.Mock(return_value="pwndbg")
             self.bootstrap.pwndbg_gdbinit_path = mock.Mock(return_value=gdbinit)
             self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["uv"], 0)
+            )
+
+            self.assertTrue(self.bootstrap.install_pwndbg_uv())
+
+        command = self.bootstrap.run.call_args.args[0]
+        self.assertIn("--reinstall", command)
+        self.assertNotIn("--upgrade", command)
+
+    def test_gdb_python_abi_is_detected_once(self):
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["gdb"], 0,
+                stdout="warning\n3.13\tlibpython3.13.so.1.0\n",
+                stderr="",
+            )
+        )
+
+        expected = ("3.13", "libpython3.13.so.1.0")
+        self.assertEqual(self.bootstrap.gdb_python_abi(), expected)
+        self.assertEqual(self.bootstrap.gdb_python_abi(), expected)
+        self.bootstrap.run.assert_called_once()
+
+    def test_gdb_python_target_prefers_matching_system_interpreter(self):
+        self.bootstrap.gdb_python_abi = mock.Mock(
+            return_value=("3.13", "libpython3.13.so.1.0")
+        )
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["python3.13"], 0,
+                stdout="3.13\tlibpython3.13.so.1.0\n",
+                stderr="",
+            )
+        )
+        with (
+            mock.patch.object(MODULE.Path, "is_file", return_value=True),
+            mock.patch.object(MODULE.os, "access", return_value=True),
+            mock.patch.object(MODULE.shutil, "which", return_value=None),
+        ):
+            self.assertEqual(
+                self.bootstrap.gdb_python_install_target(),
+                "/usr/bin/python3.13",
+            )
+
+    def test_gdb_python_target_falls_back_to_version_on_abi_mismatch(self):
+        self.bootstrap.gdb_python_abi = mock.Mock(
+            return_value=("3.13", "libpython3.13.so.1.0")
+        )
+        self.bootstrap.run = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["python3.13"], 0,
+                stdout="3.13\tlibpython3.13-custom.so\n",
+                stderr="",
+            )
+        )
+        with (
+            mock.patch.object(MODULE.Path, "is_file", return_value=True),
+            mock.patch.object(MODULE.os, "access", return_value=True),
+            mock.patch.object(MODULE.shutil, "which", return_value=None),
+        ):
+            self.assertEqual(self.bootstrap.gdb_python_install_target(), "3.13")
+
+    def test_pwndbg_uv_package_probe_uses_tool_python_and_imports_r2pipe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tool = Path(directory) / "pwndbg"
+            gdbinit = tool / "share" / "pwndbg" / "gdbinit.py"
+            python = tool / "bin" / "python"
+            gdbinit.parent.mkdir(parents=True)
+            python.parent.mkdir(parents=True)
+            gdbinit.touch()
+            python.touch(mode=0o755)
+            self.bootstrap.uv_tool_dir = mock.Mock(return_value=Path(directory))
+            self.bootstrap.run = mock.Mock(
                 return_value=subprocess.CompletedProcess(
-                    ["gdb"],
+                    [str(python)],
                     0,
                     stdout=(
-                        "INIT_PWNDBG_OK\n"
                         f"INIT_PWNDBG_VERSION={MODULE.PWNDBG_VERSION}\n"
                         f"INIT_R2PIPE_OK={MODULE.R2PIPE_VERSION}\n"
                     ),
                     stderr="",
                 )
             )
-            self.assertTrue(self.bootstrap.pwndbg_uv_environment_available())
-            self.assertTrue(self.bootstrap.pwndbg_uv_environment_available())
+            self.assertTrue(self.bootstrap.pwndbg_uv_packages_available())
+            self.assertTrue(self.bootstrap.pwndbg_uv_packages_available())
 
         self.bootstrap.run.assert_called_once()
         command = self.bootstrap.run.call_args.args[0]
-        self.assertIn("-nx", command)
-        self.assertTrue(any(str(gdbinit) in argument for argument in command))
+        self.assertEqual(command[0], str(python))
+        self.assertNotIn("gdb", command)
         self.assertTrue(any("import r2pipe" in argument for argument in command))
 
     def test_pwndbg_system_gdb_configuration_is_idempotent(self):
@@ -1185,7 +1272,7 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn("init r2ghidra bridge", gdbinit.read_text(encoding="utf-8"))
 
     def test_pwndbg_backend_probe_uses_system_gdb_and_is_cached(self):
-        self.bootstrap.pwndbg_uv_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.pwndbg_system_gdb_configured = mock.Mock(return_value=True)
         self.bootstrap.run = mock.Mock(
             return_value=subprocess.CompletedProcess(
@@ -1202,6 +1289,17 @@ class InstallerTests(unittest.TestCase):
         command = self.bootstrap.run.call_args.args[0]
         self.assertEqual(command[0], "gdb")
         self.assertTrue(any("INIT_PWNDBG_OK" in argument for argument in command))
+
+    def test_pwndbg_backend_reuses_real_integration_probe(self):
+        self.bootstrap._pwndbg_probe_cache = subprocess.CompletedProcess(
+            ["gdb"], 0,
+            stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+            stderr="",
+        )
+        self.bootstrap.run = mock.Mock()
+
+        self.assertTrue(self.bootstrap.pwndbg_backend_available())
+        self.bootstrap.run.assert_not_called()
 
     def test_pwndbg_environment_verifies_after_configuration(self):
         self.bootstrap.remove_legacy_pwndbg_portable = mock.Mock()
@@ -1269,7 +1367,7 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.bootstrap.pwndbg_r2ghidra_available())
 
     def test_pwndbg_integration_probe_uses_system_gdb_and_real_decompiler(self):
-        self.bootstrap.pwndbg_uv_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.run = mock.Mock(
             side_effect=[
                 subprocess.CompletedProcess(["gcc"], 0, stdout="", stderr=""),

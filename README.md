@@ -1,4 +1,4 @@
-# init v3.24
+# init v3.25
 
 面向 Ubuntu 24.04+ 和 Kali Linux/WSL 的 CTF 工作站初始化工具。
 
@@ -43,8 +43,10 @@ python3 init.py --update
 
 - 使用发行版的系统 `gdb`/`gdb-multiarch`。
 - 使用 `uv tool` 隔离管理当前官方稳定版 Pwndbg 2026.07.29 的 Python 依赖。
-- 根据系统 GDB 内嵌的 Python 版本创建 Pwndbg 环境。
+- 同时比较系统 GDB 与系统 Python 的版本和 `INSTSONAME`，优先使用 ABI 完全匹配的系统 Python 绝对路径创建 Pwndbg 环境。
 - 安装 Pwndbg 时通过 `--with r2pipe==1.9.8` 把 r2pipe 放入同一环境。
+- 分开验证 uv 环境中的包和系统 GDB 集成，避免把 GDB 加载错误误报成 r2pipe 缺失。
+- 健康复跑不会重装 Pwndbg；修复安装时隐藏 uv 的冗长包列表，仅输出结果或有效错误。
 - 在 `~/.gdbinit` 的受管块中自动加载 Pwndbg、启用 Debuginfod、配置 Intel 汇编格式并加载 `ghidra` 快捷命令。
 - 编译临时 ELF，在 `main` 处真正执行 r2ghidra 反编译后才判定安装成功。
 
@@ -119,14 +121,10 @@ set autoindent
 
 ```tmux
 set -g mouse on
-set -g history-limit 100000
-set -sg escape-time 0
-set -g base-index 1
-setw -g pane-base-index 1
-set -g renumber-windows on
+set -g history-limit 50000
 ```
 
-首次写入时会尝试静默重载正在运行的 Tmux；没有现有会话时，新会话会自动读取该配置。
+只保留鼠标操作和调试输出历史两项通用设置，不改变 Escape 延迟或窗口/面板编号习惯。首次写入时会尝试静默重载正在运行的 Tmux；没有现有会话时，新会话会自动读取该配置。
 
 ## Oh My Zsh
 
