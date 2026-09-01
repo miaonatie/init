@@ -126,12 +126,8 @@ LIBC_DATABASE_COMMANDS = {
     "libc-db-dump": "dump",
 }
 
-REMOTE_INSTALLERS = {
-    "pwndbg": ("https://install.pwndbg.re", ["-t", "pwndbg-gdb", "-u"]),
-}
-
 ALLOWED_INSTALLER_HOSTS = {
-    "install.pwndbg.re",
+    "astral.sh",
     "raw.githubusercontent.com",
     "sh.rustup.rs",
 }
@@ -206,15 +202,30 @@ RADARE2_MIN_VERSION = (6, 1, 4)
 RADARE2_URL = "https://github.com/radareorg/radare2.git"
 
 R2PIPE_VERSION = "1.9.8"
-PWNDBG_PYTHON_DIR = HOME / ".local" / "share" / "pwndbg-python"
+UV_INSTALLER_URL = "https://astral.sh/uv/install.sh"
+UV_COMMAND = HOME / ".local" / "bin" / "uv"
+PWNDBG_VERSION = "2026.07.29"
+PWNDBG_UV_SPEC = f"git+https://github.com/pwndbg/pwndbg@{PWNDBG_VERSION}"
+PWNDBG_TOOL_NAME = "pwndbg"
+PWNDBG_PORTABLE_USER_DIR = HOME / ".local" / "lib" / "pwndbg-gdb"
+PWNDBG_PORTABLE_SYSTEM_DIR = Path("/usr/local/lib/pwndbg-gdb")
+PWNDBG_PORTABLE_COMMANDS = (
+    HOME / ".local" / "bin" / "pwndbg",
+    HOME / ".local" / "bin" / "pwndbg-gdb",
+    Path("/usr/local/bin/pwndbg"),
+    Path("/usr/local/bin/pwndbg-gdb"),
+)
+PWNDBG_LEGACY_PYTHON_DIR = HOME / ".local" / "share" / "pwndbg-python"
 PWNDBG_BRIDGE_DIR = HOME / ".local" / "share" / "init" / "gdb"
 PWNDBG_BRIDGE_SCRIPT = PWNDBG_BRIDGE_DIR / "r2ghidra.py"
-PWNDBG_CTF_COMMAND = Path("/usr/local/bin/pwndbg-ctf")
+PWNDBG_LEGACY_CTF_COMMAND = Path("/usr/local/bin/pwndbg-ctf")
 GDBINIT = HOME / ".gdbinit"
-GDBINIT_BEGIN = "# >>> init r2ghidra bridge >>>"
-GDBINIT_END = "# <<< init r2ghidra bridge <<<"
-PWNDBG_PROFILE_BEGIN = "# >>> init pwndbg bridge >>>"
-PWNDBG_PROFILE_END = "# <<< init pwndbg bridge <<<"
+PWNDBG_GDBINIT_BEGIN = "# >>> init pwndbg/system-gdb >>>"
+PWNDBG_GDBINIT_END = "# <<< init pwndbg/system-gdb <<<"
+PWNDBG_LEGACY_GDBINIT_BEGIN = "# >>> init r2ghidra bridge >>>"
+PWNDBG_LEGACY_GDBINIT_END = "# <<< init r2ghidra bridge <<<"
+PWNDBG_LEGACY_PROFILE_BEGIN = "# >>> init pwndbg bridge >>>"
+PWNDBG_LEGACY_PROFILE_END = "# <<< init pwndbg bridge <<<"
 
 DOCKER_PACKAGES = [
     "docker-ce", "docker-ce-cli", "containerd.io",
@@ -240,6 +251,7 @@ COMMAND_PROBE_ARGUMENTS = {
     "perl": ["--version"],
     "bash": ["--version"],
     "zsh": ["--version"],
+    "uv": ["--version"],
     "gdb": ["--version"],
     "gdb-multiarch": ["--version"],
     "checksec": ["--help"],
@@ -300,10 +312,13 @@ class Bootstrap:
         self._node_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._rust_runtime_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._rust_probe_cache: subprocess.CompletedProcess[str] | None = None
+        self._pwndbg_uv_cache: bool | None = None
         self._pwndbg_backend_cache: bool | None = None
         self._pwndbg_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._r2ghidra_available_cache: bool | None = None
         self._r2pipe_available_cache: bool | None = None
+        self._uv_tool_dir_cache: Path | None = None
+        self._gdb_python_version_cache: str | None = None
         self._glibc_runtime_cache: bool | None = None
         self.distro = self.detect_distro()
         self.arch = platform.machine().lower()
@@ -1670,62 +1685,210 @@ class Bootstrap:
     def system_python() -> str:
         return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 
-    def r2pipe_target_available(self) -> bool:
-        if self._r2pipe_available_cache is not None:
-            return self._r2pipe_available_cache
-        probe_code = (
-            "import sys\n"
-            "from pathlib import Path\n"
-            f"sys.path.insert(0, {str(PWNDBG_PYTHON_DIR)!r})\n"
-            "import r2pipe\n"
-            "from importlib.metadata import version\n"
-            f"assert version('r2pipe') == {R2PIPE_VERSION!r}\n"
-            f"assert Path(r2pipe.__file__).resolve().is_relative_to(Path({str(PWNDBG_PYTHON_DIR)!r}).resolve())\n"
-            "print(r2pipe.__file__)\n"
-        )
+    def uv_executable(self) -> str | None:
+        self._extend_path()
+        found = shutil.which("uv")
+        if found:
+            return found
+        if UV_COMMAND.is_file() and os.access(UV_COMMAND, os.X_OK):
+            return str(UV_COMMAND)
+        return None
+
+    def uv_available(self) -> bool:
+        executable = self.uv_executable()
+        if executable is None:
+            return False
         result = self.run(
-            [self.system_python(), "-c", probe_code],
+            [executable, "--version"],
             check=False,
             capture=True,
             timeout=30,
         )
-        self._r2pipe_available_cache = result.returncode == 0
-        return self._r2pipe_available_cache
+        return result.returncode == 0 and (result.stdout or "").startswith("uv ")
 
-    def install_r2pipe_for_pwndbg(self, *, force: bool = False) -> bool:
-        if not force and self.r2pipe_target_available():
+    def install_uv(self) -> bool:
+        if self.uv_available():
+            self.ok(f"uv: already installed ({self.uv_executable()})")
+            return True
+
+        installer: Path | None = None
+        try:
+            installer = self.download_installer("uv", UV_INSTALLER_URL)
+            result = self.run(
+                ["sh", str(installer)],
+                check=False,
+                network=True,
+                timeout=300,
+                env={
+                    "UV_INSTALL_DIR": str(UV_COMMAND.parent),
+                    "UV_NO_MODIFY_PATH": "1",
+                },
+            )
+        except Exception as exc:
+            self.failures.append(f"uv installation failed: {exc}")
+            return False
+        finally:
+            if installer is not None:
+                try:
+                    installer.unlink()
+                except OSError:
+                    pass
+
+        self._extend_path()
+        if result.returncode != 0 or not self.uv_available():
+            self.failures.append("uv installation failed: executable unavailable after installer")
+            return False
+        self.ok(f"uv installed ({self.uv_executable()})")
+        return True
+
+    def uv_tool_dir(self) -> Path | None:
+        if self._uv_tool_dir_cache is not None:
+            return self._uv_tool_dir_cache
+        executable = self.uv_executable()
+        if executable is None:
+            return None
+        result = self.run(
+            [executable, "tool", "dir"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        if not lines:
+            return None
+        self._uv_tool_dir_cache = Path(lines[-1]).expanduser()
+        return self._uv_tool_dir_cache
+
+    def pwndbg_gdbinit_path(self) -> Path | None:
+        tool_dir = self.uv_tool_dir()
+        if tool_dir is None:
+            return None
+        return tool_dir / PWNDBG_TOOL_NAME / "share" / "pwndbg" / "gdbinit.py"
+
+    def gdb_python_version(self) -> str | None:
+        if self._gdb_python_version_cache is not None:
+            return self._gdb_python_version_cache
+        result = self.run(
+            [
+                "gdb", "-nx", "--batch",
+                "-iex", "py import sysconfig; print(sysconfig.get_config_var('VERSION'))",
+            ],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        for line in reversed((result.stdout or "").splitlines()):
+            version = line.strip()
+            if re.fullmatch(r"3\.\d+", version):
+                self._gdb_python_version_cache = version
+                return version
+        return None
+
+    def pwndbg_uv_environment_available(self) -> bool:
+        if self._pwndbg_uv_cache is not None:
+            return self._pwndbg_uv_cache
+        gdbinit = self.pwndbg_gdbinit_path()
+        if gdbinit is None or not gdbinit.is_file():
+            self._pwndbg_uv_cache = False
+            return False
+        probe = self.run(
+            [
+                "gdb", "-nx", "-q", "--batch",
+                "-ex", f"source {gdbinit}",
+                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
+                "-ex", (
+                    "pi import r2pipe; from importlib.metadata import version; "
+                    "print('INIT_PWNDBG_VERSION=' + version('pwndbg')); "
+                    "print('INIT_R2PIPE_OK=' + version('r2pipe'))"
+                ),
+                "/bin/true",
+            ],
+            check=False,
+            capture=True,
+            timeout=120,
+        )
+        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
+        version_match = re.search(r"init_pwndbg_version=([0-9]+(?:\.[0-9]+)+)", output)
+        expected_version = tuple(int(part) for part in PWNDBG_VERSION.split("."))
+        detected_version = (
+            tuple(int(part) for part in version_match.group(1).split("."))
+            if version_match is not None
+            else ()
+        )
+        self._pwndbg_uv_cache = (
+            probe.returncode == 0
+            and "init_pwndbg_ok" in output
+            and detected_version == expected_version
+            and f"init_r2pipe_ok={R2PIPE_VERSION}" in output
+            and "traceback" not in output
+        )
+        return self._pwndbg_uv_cache
+
+    def install_pwndbg_uv(self, *, force: bool = False) -> bool:
+        if not self.install_uv():
+            return False
+        if (
+            not self.update_existing
+            and not force
+            and self.pwndbg_uv_environment_available()
+            and self.find_command(["pwndbg"]) is not None
+        ):
             self.ok(
-                f"r2pipe {R2PIPE_VERSION} for Pwndbg: already installed "
-                f"({PWNDBG_PYTHON_DIR})"
+                f"Pwndbg {PWNDBG_VERSION} and r2pipe: already installed "
+                "in the uv tool environment"
             )
             return True
 
-        PWNDBG_PYTHON_DIR.mkdir(parents=True, exist_ok=True)
-        self.info(
-            f"{'repairing' if force else 'installing'} r2pipe {R2PIPE_VERSION} "
-            "in Pwndbg's fixed Python path"
-        )
-        reinstall = ["--force-reinstall"] if force else []
-        result = self.run(
-            [
-                self.system_python(), "-m", "pip", "install",
-                "--break-system-packages", "--disable-pip-version-check",
-                *PIP_NETWORK_OPTIONS, "--upgrade", *reinstall, "--no-deps",
-                "--target", str(PWNDBG_PYTHON_DIR),
-                f"r2pipe=={R2PIPE_VERSION}",
-            ],
-            check=False,
-            timeout=300,
-            env={"PIP_ROOT_USER_ACTION": "ignore"},
-        )
-        self._r2pipe_available_cache = None
-        if result.returncode != 0 or not self.r2pipe_target_available():
+        python_version = self.gdb_python_version()
+        if python_version is None:
             self.failures.append(
-                "Pwndbg r2pipe installation failed: the isolated package could not be imported"
+                "Pwndbg installation failed: could not determine system GDB's Python version"
             )
             return False
-        self.ok(f"r2pipe {R2PIPE_VERSION} installed for Pwndbg")
+        executable = self.uv_executable()
+        assert executable is not None
+        command = [
+            executable, "tool", "install",
+            "--python", python_version,
+            "--with", f"r2pipe=={R2PIPE_VERSION}",
+        ]
+        if force or self.update_existing or self.pwndbg_gdbinit_path() is not None:
+            command.extend(["--upgrade", "--reinstall"])
+        command.append(PWNDBG_UV_SPEC)
+        self.info(
+            f"installing Pwndbg {PWNDBG_VERSION} for system GDB "
+            f"Python {python_version} with uv"
+        )
+        result = self.run(
+            command,
+            check=False,
+            network=True,
+            timeout=900,
+        )
+        self._uv_tool_dir_cache = None
+        self._pwndbg_uv_cache = None
+        self._pwndbg_backend_cache = None
+        self._r2pipe_available_cache = None
+        if result.returncode != 0 or not self.pwndbg_uv_environment_available():
+            self.failures.append(
+                "Pwndbg uv installation failed: Pwndbg or r2pipe could not load in system GDB"
+            )
+            return False
+        self.ok(
+            f"Pwndbg {PWNDBG_VERSION} installed with uv for system GDB; "
+            f"r2pipe {R2PIPE_VERSION} included"
+        )
         return True
+
+    def r2pipe_target_available(self) -> bool:
+        if self._r2pipe_available_cache is not None:
+            return self._r2pipe_available_cache
+        self._r2pipe_available_cache = self.pwndbg_uv_environment_available()
+        return self._r2pipe_available_cache
 
     @staticmethod
     def write_text_if_changed(path: Path, content: str) -> bool:
@@ -1778,6 +1941,80 @@ class Bootstrap:
                 updated += "\n\n"
             updated += managed
         return self.write_text_if_changed(path, updated.rstrip("\n") + "\n")
+
+    def remove_managed_block(self, path: Path, begin: str, end: str) -> bool:
+        try:
+            existing = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return False
+        pattern = re.compile(
+            rf"(?ms)^\s*{re.escape(begin)}$.*?^\s*{re.escape(end)}\s*$\n?"
+        )
+        updated = pattern.sub("", existing)
+        if updated == existing:
+            return False
+        normalized = re.sub(r"\n{3,}", "\n\n", updated).lstrip("\n")
+        return self.write_text_if_changed(path, normalized.rstrip("\n") + "\n")
+
+    @staticmethod
+    def path_resolves_within(path: Path, directory: Path) -> bool:
+        try:
+            return path.resolve(strict=False).is_relative_to(directory.resolve(strict=False))
+        except OSError:
+            return False
+
+    def remove_legacy_pwndbg_portable(self) -> None:
+        changed = False
+        for profile in (BASHRC, ZSHRC):
+            changed |= self.remove_managed_block(
+                profile,
+                PWNDBG_LEGACY_PROFILE_BEGIN,
+                PWNDBG_LEGACY_PROFILE_END,
+            )
+        changed |= self.remove_managed_block(
+            GDBINIT,
+            PWNDBG_LEGACY_GDBINIT_BEGIN,
+            PWNDBG_LEGACY_GDBINIT_END,
+        )
+
+        for command in PWNDBG_PORTABLE_COMMANDS:
+            portable_root = (
+                PWNDBG_PORTABLE_USER_DIR
+                if command.is_relative_to(HOME)
+                else PWNDBG_PORTABLE_SYSTEM_DIR
+            )
+            if not command.is_symlink() or not self.path_resolves_within(command, portable_root):
+                continue
+            if command.is_relative_to(HOME) or os.geteuid() == 0:
+                command.unlink(missing_ok=True)
+            else:
+                self.run(["rm", "-f", str(command)], sudo=True, check=False)
+            changed = True
+
+        if (PWNDBG_PORTABLE_USER_DIR / "bin" / "pwndbg").exists():
+            shutil.rmtree(PWNDBG_PORTABLE_USER_DIR)
+            changed = True
+        if (PWNDBG_PORTABLE_SYSTEM_DIR / "bin" / "pwndbg").exists():
+            result = self.run(
+                ["rm", "-rf", str(PWNDBG_PORTABLE_SYSTEM_DIR)],
+                sudo=True,
+                check=False,
+            )
+            changed |= result.returncode == 0
+
+        if PWNDBG_LEGACY_PYTHON_DIR.exists():
+            shutil.rmtree(PWNDBG_LEGACY_PYTHON_DIR)
+            changed = True
+        if PWNDBG_LEGACY_CTF_COMMAND.exists() or PWNDBG_LEGACY_CTF_COMMAND.is_symlink():
+            result = self.run(
+                ["rm", "-f", str(PWNDBG_LEGACY_CTF_COMMAND)],
+                sudo=True,
+                check=False,
+            )
+            changed |= result.returncode == 0
+
+        if changed:
+            self.ok("legacy portable Pwndbg, launcher and isolated r2pipe removed")
 
     def install_command_wrapper(self, destination: Path, content: str) -> bool:
         normalized = content.rstrip("\n") + "\n"
@@ -1836,72 +2073,18 @@ class Bootstrap:
     @staticmethod
     def pwndbg_bridge_source() -> str:
         return f'''# Generated by init. Local changes may be replaced on the next run.
-import importlib
-import importlib.util
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import gdb
 
-
-R2PIPE_PATH = {str(PWNDBG_PYTHON_DIR)!r}
-if R2PIPE_PATH not in sys.path:
-    sys.path.insert(0, R2PIPE_PATH)
-importlib.invalidate_caches()
-
-
-def _init_load_r2pipe():
-    """Load r2pipe even when the portable Pwndbg launcher isolates sys.path."""
-    if getattr(gdb, "_init_r2pipe_checked", False):
-        cached = getattr(gdb, "_init_r2pipe_module", None)
-        if cached is not None:
-            sys.modules["r2pipe"] = cached
-        return cached
-    try:
-        module = importlib.import_module("r2pipe")
-    except Exception as normal_exc:
-        package_dir = Path(R2PIPE_PATH) / "r2pipe"
-        package_file = package_dir / "__init__.py"
-        module_file = Path(R2PIPE_PATH) / "r2pipe.py"
-        try:
-            if package_file.is_file():
-                init_file = package_file
-                search_locations = [str(package_dir)]
-            elif module_file.is_file():
-                init_file = module_file
-                search_locations = None
-            else:
-                raise FileNotFoundError(
-                    f"r2pipe module not found under {{R2PIPE_PATH}}"
-                )
-            spec = importlib.util.spec_from_file_location(
-                "r2pipe",
-                init_file,
-                submodule_search_locations=search_locations,
-            )
-            if spec is None or spec.loader is None:
-                raise ImportError(f"cannot create a module spec for {{init_file}}")
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["r2pipe"] = module
-            spec.loader.exec_module(module)
-        except Exception as direct_exc:
-            sys.modules.pop("r2pipe", None)
-            gdb._init_r2pipe_checked = True
-            gdb._init_r2pipe_module = None
-            print(
-                "init r2pipe fast path unavailable: "
-                f"normal={{normal_exc!r}}; direct={{direct_exc!r}}"
-            )
-            return None
-    gdb._init_r2pipe_checked = True
-    gdb._init_r2pipe_module = module
-    return module
-
-
-_INIT_R2PIPE = _init_load_r2pipe()
+try:
+    import r2pipe as _INIT_R2PIPE
+except Exception as exc:
+    _INIT_R2PIPE = None
+    print(f"init r2pipe integration unavailable: {{exc!r}}")
 _INIT_ANALYZED_TARGETS = set()
 
 
@@ -2107,92 +2290,66 @@ except gdb.error:
     InitGhidraCommand()
 '''
 
-    def configure_pwndbg_r2ghidra(self) -> bool:
+    def configure_pwndbg_system_gdb(self) -> bool:
+        gdbinit = self.pwndbg_gdbinit_path()
+        if gdbinit is None or not gdbinit.is_file():
+            self.failures.append("Pwndbg configuration failed: uv gdbinit.py was not found")
+            return False
+        body = (
+            "set pagination off\n"
+            "set confirm off\n"
+            "set disassembly-flavor intel\n"
+            "set print pretty on\n"
+            "set history save on\n"
+            f"set history filename {HOME / '.gdb_history'}\n"
+            "set debuginfod enabled on\n"
+            "set debuginfod verbose 0\n"
+            "set debuginfod urls https://debuginfod.pwndbg.re\n"
+            f"source {gdbinit}\n"
+            f"source {PWNDBG_BRIDGE_SCRIPT}"
+        )
         try:
             self.write_text_if_changed(PWNDBG_BRIDGE_SCRIPT, self.pwndbg_bridge_source())
-            try:
-                existing = GDBINIT.read_text(encoding="utf-8")
-            except FileNotFoundError:
-                existing = ""
-            managed = (
-                f"{GDBINIT_BEGIN}\n"
-                f"source {PWNDBG_BRIDGE_SCRIPT}\n"
-                f"{GDBINIT_END}"
+            self.update_managed_block(
+                GDBINIT,
+                PWNDBG_GDBINIT_BEGIN,
+                PWNDBG_GDBINIT_END,
+                body,
             )
-            pattern = re.compile(
-                rf"(?ms)^{re.escape(GDBINIT_BEGIN)}$.*?^{re.escape(GDBINIT_END)}$"
-            )
-            if pattern.search(existing):
-                updated = pattern.sub(managed, existing)
-            else:
-                updated = existing.rstrip("\n")
-                if updated:
-                    updated += "\n\n"
-                updated += managed
-            self.write_text_if_changed(GDBINIT, updated.rstrip("\n") + "\n")
         except OSError as exc:
-            self.failures.append(f"Pwndbg r2ghidra configuration failed: {exc}")
+            self.failures.append(f"Pwndbg system GDB configuration failed: {exc}")
             return False
         return True
 
-    @staticmethod
-    def pwndbg_launcher_source(backend: str) -> str:
-        return (
-            "#!/usr/bin/env bash\n"
-            "set -e\n"
-            f"exec {shlex.quote(backend)} -x "
-            f"{shlex.quote(str(PWNDBG_BRIDGE_SCRIPT))} \"$@\"\n"
-        )
-
-    def configure_pwndbg_launcher(self) -> bool:
-        backend = self.find_command(["pwndbg", "pwndbg-gdb"])
-        if backend is None:
-            self.failures.append("Pwndbg bridge launcher failed: Pwndbg executable not found")
+    def pwndbg_system_gdb_configured(self) -> bool:
+        gdbinit = self.pwndbg_gdbinit_path()
+        if gdbinit is None or not gdbinit.is_file() or not PWNDBG_BRIDGE_SCRIPT.is_file():
             return False
-        if not self.install_command_wrapper(
-            PWNDBG_CTF_COMMAND,
-            self.pwndbg_launcher_source(backend),
-        ):
-            self.failures.append("Pwndbg bridge launcher installation failed")
-            return False
-
-        shell_body = (
-            "unalias pwndbg 2>/dev/null || true\n"
-            "pwndbg() {\n"
-            f"  {shlex.quote(str(PWNDBG_CTF_COMMAND))} \"$@\"\n"
-            "}"
-        )
         try:
-            for profile in (BASHRC, ZSHRC):
-                self.update_managed_block(
-                    profile,
-                    PWNDBG_PROFILE_BEGIN,
-                    PWNDBG_PROFILE_END,
-                    shell_body,
-                )
-        except OSError as exc:
-            self.failures.append(f"Pwndbg shell launcher configuration failed: {exc}")
+            text = GDBINIT.read_text(encoding="utf-8")
+        except OSError:
             return False
-        return True
+        return all(
+            marker in text
+            for marker in (
+                PWNDBG_GDBINIT_BEGIN,
+                PWNDBG_GDBINIT_END,
+                f"source {gdbinit}",
+                f"source {PWNDBG_BRIDGE_SCRIPT}",
+                "set debuginfod enabled on",
+                "set debuginfod urls https://debuginfod.pwndbg.re",
+            )
+        )
 
     def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
         if self._pwndbg_probe_cache is not None:
             return self._pwndbg_probe_cache
-        if not self.r2pipe_target_available():
+        if not self.pwndbg_uv_environment_available():
             self._pwndbg_probe_cache = subprocess.CompletedProcess(
-                [str(PWNDBG_CTF_COMMAND)], 1, "", "isolated r2pipe unavailable"
+                ["gdb"], 1, "", "Pwndbg uv environment unavailable"
             )
             return self._pwndbg_probe_cache
-        if PWNDBG_CTF_COMMAND.exists():
-            command = [str(PWNDBG_CTF_COMMAND)]
-        else:
-            backend = self.find_command(["pwndbg", "pwndbg-gdb"])
-            if backend is None:
-                self._pwndbg_probe_cache = subprocess.CompletedProcess(
-                    ["pwndbg"], 127, "", "Pwndbg executable not found"
-                )
-                return self._pwndbg_probe_cache
-            command = [backend, "-x", str(PWNDBG_BRIDGE_SCRIPT)]
+        command = ["gdb"]
         try:
             with tempfile.TemporaryDirectory(prefix="init-ghidra-probe-") as directory:
                 source = Path(directory) / "probe.c"
@@ -2214,6 +2371,7 @@ except gdb.error:
                 self._pwndbg_probe_cache = self.run(
                     [
                         *command, "-q", "--batch",
+                        "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
                         "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK=' + r2pipe.__file__)",
                         "-ex", "help ghidra",
                         "-ex", "break main",
@@ -2237,43 +2395,47 @@ except gdb.error:
         output = ((result.stdout or "") + (result.stderr or "")).lower()
         return (
             result.returncode == 0
+            and "init_pwndbg_ok" in output
             and "init_r2pipe_ok=" in output
             and "decompile an address with pwndbg" in output
             and "init_ghidra_ok=pwndbg-r2pipe" in output
         )
 
-    def install_pwndbg_r2ghidra_bridge(self) -> None:
-        if not self.install_r2pipe_for_pwndbg():
+    def install_pwndbg_environment(self) -> None:
+        self.remove_legacy_pwndbg_portable()
+        if not self.install_pwndbg_uv():
             return
-        if not self.configure_pwndbg_r2ghidra():
-            return
-        if not self.configure_pwndbg_launcher():
+        if not self.configure_pwndbg_system_gdb():
             return
         self._pwndbg_probe_cache = None
         probe = self.pwndbg_r2ghidra_probe()
         output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         if (
-            "init_r2pipe_ok=" not in output
+            "init_pwndbg_ok" not in output
+            or "init_r2pipe_ok=" not in output
             or "init_ghidra_ok=pwndbg-r2pipe" not in output
         ):
             self.warn(
-                "Pwndbg could not use its native r2pipe command; "
-                "repairing the isolated package once"
+                "system GDB could not use the uv-managed Pwndbg/r2pipe environment; "
+                "repairing it once"
             )
-            if not self.install_r2pipe_for_pwndbg(force=True):
+            if not self.install_pwndbg_uv(force=True):
+                return
+            if not self.configure_pwndbg_system_gdb():
                 return
             self._pwndbg_probe_cache = None
             probe = self.pwndbg_r2ghidra_probe()
             output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         if (
             probe.returncode == 0
+            and "init_pwndbg_ok" in output
             and "init_r2pipe_ok=" in output
             and "decompile an address with pwndbg" in output
             and "init_ghidra_ok=pwndbg-r2pipe" in output
         ):
             self.ok(
-                "Pwndbg native r2pipe and r2ghidra verified with real decompilation; "
-                "pwndbg-ctf and shell pwndbg command are ready"
+                "system GDB automatically loads uv-managed Pwndbg; "
+                "r2pipe and r2ghidra passed real decompilation"
             )
         else:
             details = [
@@ -2868,17 +3030,20 @@ except gdb.error:
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return path
 
-    def pwndbg_backend_available(self, command_names: list[str]) -> bool:
+    def pwndbg_backend_available(self) -> bool:
         if self._pwndbg_backend_cache is not None:
             return self._pwndbg_backend_cache
-        backend = self.find_command(command_names)
-        if backend is None:
+        if (
+            not self.pwndbg_uv_environment_available()
+            or not self.pwndbg_system_gdb_configured()
+        ):
             self._pwndbg_backend_cache = False
             return False
         probe = self.run(
             [
-                backend, "-q", "--batch",
+                "gdb", "-q", "--batch",
                 "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
+                "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK')",
                 "/bin/true",
             ],
             check=False,
@@ -2889,46 +3054,10 @@ except gdb.error:
         self._pwndbg_backend_cache = (
             probe.returncode == 0
             and "init_pwndbg_ok" in output
+            and "init_r2pipe_ok" in output
             and "traceback" not in output
         )
         return self._pwndbg_backend_cache
-
-    def install_remote_tool(self, name: str, command_names: list[str]) -> None:
-        if (
-            name == "pwndbg"
-            and self.pwndbg_backend_available(command_names)
-            and not self.update_existing
-        ):
-            self.ok(f"{name}: already installed and launchable")
-            return
-        url, arguments = REMOTE_INSTALLERS[name]
-        installer: Path | None = None
-        try:
-            installer = self.download_installer(name, url)
-            result = self.run(
-                ["bash", str(installer), *arguments],
-                check=False,
-                timeout=600,
-            )
-            self._extend_path()
-            if name == "pwndbg":
-                self._pwndbg_backend_cache = None
-                self._pwndbg_probe_cache = None
-            available = result.returncode == 0 and (
-                self.pwndbg_backend_available(command_names)
-                if name == "pwndbg"
-                else any(self.command_exists(command) for command in command_names)
-            )
-            if not available:
-                self.failures.append(f"{name} installation failed")
-        except Exception as exc:
-            self.failures.append(f"{name} installation failed: {exc}")
-        finally:
-            if installer is not None:
-                try:
-                    installer.unlink()
-                except OSError:
-                    pass
 
     def install_ctf_toolchain(self) -> None:
         self.install_python2_legacy()
@@ -2938,8 +3067,7 @@ except gdb.error:
         self.install_rust_environment()
         if self.install_radare2():
             self.install_r2ghidra()
-        self.install_remote_tool("pwndbg", ["pwndbg", "pwndbg-gdb"])
-        self.install_pwndbg_r2ghidra_bridge()
+        self.install_pwndbg_environment()
         self.install_helper_repositories()
 
     def find_command(self, names: list[str]) -> str | None:
@@ -2976,6 +3104,7 @@ except gdb.error:
             ("perl", ["perl"]),
             ("bash", ["bash"]),
             ("zsh", ["zsh"]),
+            ("uv", ["uv"]),
             ("gdb", ["gdb"]),
             ("gdb-multiarch", ["gdb-multiarch"]),
             ("checksec", ["checksec"]),
@@ -3150,10 +3279,21 @@ except gdb.error:
             self.error(message)
 
         if self.r2pipe_target_available():
-            self.ok(f"Pwndbg r2pipe {R2PIPE_VERSION}: {PWNDBG_PYTHON_DIR}")
+            self.ok(
+                f"Pwndbg r2pipe {R2PIPE_VERSION}: included in the uv tool environment"
+            )
         else:
             ok_all = False
-            message = "verification failed: isolated Pwndbg r2pipe package not found"
+            message = "verification failed: uv-managed Pwndbg r2pipe package not found"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.pwndbg_backend_available():
+            self.ok("system GDB automatically loads uv-managed Pwndbg")
+        else:
+            ok_all = False
+            message = "verification failed: system GDB Pwndbg auto-load unavailable"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)
@@ -3249,6 +3389,14 @@ except gdb.error:
         self.run_stage("Verification", self.verify)
         return self.summary()
 
+    def remove_portable_pwndbg_only(self) -> int:
+        print(self.colorize("36;1", f"init {VERSION}"))
+        print("Removing only the legacy portable Pwndbg integration")
+        self.require_sudo()
+        self.remove_legacy_pwndbg_portable()
+        self.ok("legacy portable Pwndbg cleanup completed")
+        return 0
+
 
 def help_text() -> str:
     return f"""init {VERSION}
@@ -3256,10 +3404,14 @@ def help_text() -> str:
 Usage:
   python3 init.py          Initialize and verify the CTF environment
   python3 init.py --update Update managed tools, then verify everything
+  python3 init.py --remove-portable-pwndbg
+                           Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
 
 The default operation skips usable tools. --update refreshes managed language
-toolchains and repositories. Neither mode runs full-upgrade or autoremove.
+toolchains and repositories. The default operation also migrates the legacy
+portable Pwndbg installation to system GDB plus uv. Neither install mode runs
+full-upgrade or autoremove.
 """.strip()
 
 
@@ -3267,12 +3419,14 @@ def main(argv: list[str]) -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--update"]):
+    if argv not in ([], ["--update"], ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
     bootstrap = Bootstrap(update_existing=argv == ["--update"])
     try:
+        if argv == ["--remove-portable-pwndbg"]:
+            return bootstrap.remove_portable_pwndbg_only()
         return bootstrap.install()
     except KeyboardInterrupt:
         print("\ninstallation cancelled", file=sys.stderr)

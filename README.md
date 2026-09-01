@@ -1,4 +1,4 @@
-# init v3.22
+# init v3.23
 
 面向 Ubuntu 24.04+ 和 Kali Linux/WSL 的 CTF 工作站初始化工具。
 
@@ -21,6 +21,53 @@ python3 init.py
 ```bash
 python3 init.py --update
 ```
+
+## Pwndbg、GDB 和 r2ghidra
+
+脚本使用当前官方支持的经典方案：
+
+- 使用发行版的系统 `gdb`/`gdb-multiarch`。
+- 使用 `uv tool` 隔离管理当前官方稳定版 Pwndbg 2026.07.29 的 Python 依赖。
+- 根据系统 GDB 内嵌的 Python 版本创建 Pwndbg 环境。
+- 安装 Pwndbg 时通过 `--with r2pipe==1.9.8` 把 r2pipe 放入同一环境。
+- 在 `~/.gdbinit` 的受管块中自动加载 Pwndbg、启用 Debuginfod、配置 Intel 汇编格式并加载 `ghidra` 快捷命令。
+- 编译临时 ELF，在 `main` 处真正执行 r2ghidra 反编译后才判定安装成功。
+
+日常直接运行系统 GDB，Pwndbg 会自动启动：
+
+```bash
+gdb ./chall
+```
+
+也可以使用 uv 提供的入口：
+
+```bash
+pwndbg ./chall
+```
+
+需要完全跳过 `~/.gdbinit`、进入纯净系统 GDB 时：
+
+```bash
+gdb -nx ./chall
+```
+
+Pwndbg 中可以使用：
+
+```gdb
+start
+r2pipe aaa
+r2pipe pdg @ sym.main
+ghidra
+ghidra &main
+```
+
+从 v3.22 或更早版本升级时，普通 `python3 init.py` 会自动、一次性删除脚本管理的便携版目录、`pwndbg-ctf`、Shell 包装函数和独立 r2pipe 目录，然后迁移到 uv。只想清理旧便携版而暂时不安装新版本，可以运行：
+
+```bash
+python3 init.py --remove-portable-pwndbg
+```
+
+该操作只移除旧脚本的受管配置块和已确认属于官方便携版的链接/目录，保留 `.gdbinit`、`.bashrc` 和 `.zshrc` 中的其他个人配置。
 
 ## HyFetch 和后端
 
