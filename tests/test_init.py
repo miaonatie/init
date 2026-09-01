@@ -448,6 +448,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_command_links = mock.Mock()
         self.bootstrap.install_fastfetch = mock.Mock()
         self.bootstrap.configure_vim = mock.Mock()
+        self.bootstrap.configure_tmux = mock.Mock()
         self.bootstrap.install_oh_my_zsh = mock.Mock()
         self.bootstrap.install_docker = mock.Mock()
         self.bootstrap.install_system_foundation()
@@ -464,6 +465,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(calls[3].args[0], MODULE.I386_APT)
         self.bootstrap.install_fastfetch.assert_called_once_with()
         self.bootstrap.configure_vim.assert_called_once_with()
+        self.bootstrap.configure_tmux.assert_called_once_with()
         self.bootstrap.install_oh_my_zsh.assert_called_once_with()
 
     def test_healthy_fastfetch_skips_package_and_network_work(self):
@@ -545,6 +547,37 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("set shiftwidth=4", first)
         self.assertIn("set expandtab", first)
         self.assertIn("set autoindent", first)
+
+    def test_tmux_configuration_preserves_user_settings_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tmux_conf = Path(directory) / ".tmux.conf"
+            tmux_conf.write_text("setw -g mode-keys vi\n", encoding="utf-8")
+            self.bootstrap.find_command = mock.Mock(return_value="/usr/bin/tmux")
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(["tmux"], 0)
+            )
+            with mock.patch.object(MODULE, "TMUX_CONF", tmux_conf):
+                self.bootstrap.configure_tmux()
+                first = tmux_conf.read_text(encoding="utf-8")
+                self.bootstrap.configure_tmux()
+                second = tmux_conf.read_text(encoding="utf-8")
+                self.assertTrue(self.bootstrap.tmux_config_ready())
+
+        self.assertEqual(first, second)
+        self.assertIn("setw -g mode-keys vi", first)
+        self.assertEqual(first.count(MODULE.TMUX_PROFILE_BEGIN), 1)
+        self.assertIn("set -g mouse on", first)
+        self.assertIn("set -g history-limit 100000", first)
+        self.assertIn("set -sg escape-time 0", first)
+        self.assertIn("set -g base-index 1", first)
+        self.assertIn("setw -g pane-base-index 1", first)
+        self.assertIn("set -g renumber-windows on", first)
+        self.bootstrap.run.assert_called_once_with(
+            ["/usr/bin/tmux", "source-file", str(tmux_conf)],
+            check=False,
+            capture=True,
+            timeout=10,
+        )
 
     def test_oh_my_zsh_configuration_merges_plugins_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:

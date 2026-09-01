@@ -1,4 +1,4 @@
-# init v3.23
+# init v3.24
 
 面向 Ubuntu 24.04+ 和 Kali Linux/WSL 的 CTF 工作站初始化工具。
 
@@ -21,6 +21,21 @@ python3 init.py
 ```bash
 python3 init.py --update
 ```
+
+## 文件和配置变更
+
+脚本只在需要时创建或修改以下用户级路径：
+
+- `~/.vimrc`：基础 Vim 受管配置块。
+- `~/.tmux.conf`：基础 Tmux 受管配置块。
+- `~/.gdbinit`：系统 GDB 自动加载 Pwndbg、Debuginfod 和 r2ghidra 快捷命令。
+- `~/.bashrc`、`~/.zshrc`：NVM、Rust 和 Oh My Zsh 配置；保留其他个人内容。
+- `~/.oh-my-zsh`：Oh My Zsh 及两个外部插件。
+- `~/.local/bin`、`~/.local/share/uv/tools/pwndbg`：uv 和 Pwndbg。
+- `~/.local/share/init/gdb/r2ghidra.py`：Pwndbg 的 `ghidra` 快捷命令。
+- `~/.cargo`、`~/.rustup`、`~/tools`：Rust、NVM、radare2、Python 2 和 libc 工具。
+
+系统级变更包括 APT 软件包、Docker 软件源与软件包、必要的 `/usr/local/bin` 命令链接，以及把当前运行用户的默认 Shell 设置为 zsh。脚本不会创建 `~/.inputrc`、EXP 模板或 `pwn-exp-init` 命令。
 
 ## Pwndbg、GDB 和 r2ghidra
 
@@ -97,6 +112,21 @@ set autoindent
 ```
 
 同时启用行号、搜索高亮、智能缩进、语法高亮和文件类型缩进。可以继续使用 `vim ~/.vimrc` 添加个人配置；脚本复跑不会覆盖块外内容。
+
+## Tmux
+
+脚本保留原有 `~/.tmux.conf`，只维护一个基础配置块：
+
+```tmux
+set -g mouse on
+set -g history-limit 100000
+set -sg escape-time 0
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on
+```
+
+首次写入时会尝试静默重载正在运行的 Tmux；没有现有会话时，新会话会自动读取该配置。
 
 ## Oh My Zsh
 

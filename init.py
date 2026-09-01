@@ -142,6 +142,7 @@ NVM_URL = f"https://raw.githubusercontent.com/nvm-sh/nvm/v{NVM_VERSION}/install.
 BASHRC = HOME / ".bashrc"
 ZSHRC = HOME / ".zshrc"
 VIMRC = HOME / ".vimrc"
+TMUX_CONF = HOME / ".tmux.conf"
 NVM_PROFILE_BEGIN = "# >>> init nvm/node >>>"
 NVM_PROFILE_END = "# <<< init nvm/node <<<"
 
@@ -163,6 +164,15 @@ set incsearch
 set hlsearch
 syntax enable
 filetype plugin indent on"""
+
+TMUX_PROFILE_BEGIN = "# >>> init tmux defaults >>>"
+TMUX_PROFILE_END = "# <<< init tmux defaults <<<"
+TMUX_DEFAULTS = """set -g mouse on
+set -g history-limit 100000
+set -sg escape-time 0
+set -g base-index 1
+setw -g pane-base-index 1
+set -g renumber-windows on"""
 
 OH_MY_ZSH_DIR = HOME / ".oh-my-zsh"
 OH_MY_ZSH_URL = "https://github.com/ohmyzsh/ohmyzsh.git"
@@ -750,6 +760,7 @@ class Bootstrap:
         self.install_command_links()
         self.install_fastfetch()
         self.configure_vim()
+        self.configure_tmux()
         self.install_oh_my_zsh()
         self.install_docker()
 
@@ -931,6 +942,44 @@ class Bootstrap:
             VIM_PROFILE_BEGIN in content
             and VIM_PROFILE_END in content
             and all(line in content for line in VIM_DEFAULTS.splitlines())
+        )
+
+    def configure_tmux(self) -> None:
+        try:
+            changed = self.update_managed_block(
+                TMUX_CONF,
+                TMUX_PROFILE_BEGIN,
+                TMUX_PROFILE_END,
+                TMUX_DEFAULTS,
+            )
+        except OSError as exc:
+            self.failures.append(f"Tmux configuration failed: {exc}")
+            return
+
+        # Existing tmux servers do not reread ~/.tmux.conf automatically.
+        # A missing server is normal; new sessions will load the file themselves.
+        if changed:
+            tmux = self.find_command(["tmux"])
+            if tmux:
+                self.run(
+                    [tmux, "source-file", str(TMUX_CONF)],
+                    check=False,
+                    capture=True,
+                    timeout=10,
+                )
+        status = "configured" if changed else "already configured"
+        self.ok(f"Tmux defaults: {status} ({TMUX_CONF})")
+
+    @staticmethod
+    def tmux_config_ready() -> bool:
+        try:
+            content = TMUX_CONF.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return (
+            TMUX_PROFILE_BEGIN in content
+            and TMUX_PROFILE_END in content
+            and all(line in content for line in TMUX_DEFAULTS.splitlines())
         )
 
     def clone_or_update_at(
@@ -3164,6 +3213,15 @@ except gdb.error:
         else:
             ok_all = False
             message = "verification failed: managed Vim defaults unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.tmux_config_ready():
+            self.ok(f"Tmux defaults: {TMUX_CONF}")
+        else:
+            ok_all = False
+            message = "verification failed: managed Tmux defaults unavailable"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)
