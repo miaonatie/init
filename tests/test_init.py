@@ -122,6 +122,27 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         _sleep.assert_called_once_with(2)
 
+    @mock.patch.object(MODULE.subprocess, "run")
+    def test_timeout_output_is_decoded_and_reports_timeout(self, run):
+        run.side_effect = subprocess.TimeoutExpired(
+            ["uv", "tool", "upgrade"],
+            30,
+            output=b"partial stdout\n",
+            stderr=b"partial stderr\n",
+        )
+
+        result = self.bootstrap.run(
+            ["uv", "tool", "upgrade"],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "partial stdout\n")
+        self.assertIn("partial stderr", result.stderr)
+        self.assertIn("timed out after 30s", result.stderr)
+
     def test_existing_repository_is_not_updated(self):
         with tempfile.TemporaryDirectory() as directory:
             tools_dir = Path(directory)
@@ -1045,7 +1066,8 @@ class InstallerTests(unittest.TestCase):
             command[command.index("--with") + 1],
             f"r2pipe=={MODULE.R2PIPE_VERSION}",
         )
-        self.assertEqual(command[-1], MODULE.PWNDBG_UV_SPEC)
+        self.assertIn(MODULE.PWNDBG_UV_SPEC, command)
+        self.assertIn("--no-progress", command)
         self.assertNotIn("pwndbg-gdb", " ".join(command))
         self.assertTrue(self.bootstrap.run.call_args.kwargs["capture"])
 
@@ -1076,8 +1098,12 @@ class InstallerTests(unittest.TestCase):
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv(force=True))
         command = self.bootstrap.run.call_args.args[0]
+        self.assertEqual(command[1:3], ["tool", "upgrade"])
         self.assertNotIn("--upgrade", command)
         self.assertIn("--reinstall", command)
+        self.assertIn(MODULE.PWNDBG_TOOL_NAME, command)
+        self.assertNotIn(MODULE.PWNDBG_UV_SPEC, command)
+        self.assertNotIn("network", self.bootstrap.run.call_args.kwargs)
 
     def test_broken_existing_uv_pwndbg_reinstalls_without_upgrading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1278,7 +1304,7 @@ class InstallerTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(
                 ["gdb"],
                 0,
-                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK\n",
+                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
                 stderr="",
             )
         )
@@ -1288,10 +1314,11 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run.assert_called_once()
         command = self.bootstrap.run.call_args.args[0]
         self.assertEqual(command[0], "gdb")
+        self.assertIn("set debuginfod enabled off", command)
         self.assertTrue(any("INIT_PWNDBG_OK" in argument for argument in command))
 
-    def test_pwndbg_backend_reuses_real_integration_probe(self):
-        self.bootstrap._pwndbg_probe_cache = subprocess.CompletedProcess(
+    def test_pwndbg_backend_reuses_import_probe(self):
+        self.bootstrap._pwndbg_import_probe_cache = subprocess.CompletedProcess(
             ["gdb"], 0,
             stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
             stderr="",
@@ -1305,6 +1332,13 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.remove_legacy_pwndbg_portable = mock.Mock()
         self.bootstrap.install_pwndbg_uv = mock.Mock(return_value=True)
         self.bootstrap.configure_pwndbg_system_gdb = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_gdb_import_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["gdb"], 0,
+                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe/__init__.py\n",
+                stderr="",
+            )
+        )
         self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 ["gdb"],
@@ -1329,23 +1363,30 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.remove_legacy_pwndbg_portable = mock.Mock()
         self.bootstrap.install_pwndbg_uv = mock.Mock(return_value=True)
         self.bootstrap.configure_pwndbg_system_gdb = mock.Mock(return_value=True)
-        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+        self.bootstrap.pwndbg_gdb_import_probe = mock.Mock(
             side_effect=[
                 subprocess.CompletedProcess(
                     ["gdb"], 0,
-                    stdout="INIT_PWNDBG_OK\nINIT_GHIDRA_OK=external-r2\n",
+                    stdout="INIT_PWNDBG_OK\n",
                     stderr="Could not import r2pipe\n",
                 ),
                 subprocess.CompletedProcess(
                     ["gdb"], 0,
-                    stdout=(
-                        "INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n"
-                        "Decompile an address with Pwndbg\n"
-                        "INIT_GHIDRA_OK=pwndbg-r2pipe\n"
-                    ),
+                    stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
                     stderr="",
                 ),
             ]
+        )
+        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["gdb"], 0,
+                stdout=(
+                    "INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n"
+                    "Decompile an address with Pwndbg\n"
+                    "INIT_GHIDRA_OK=pwndbg-r2pipe\n"
+                ),
+                stderr="",
+            )
         )
 
         self.bootstrap.install_pwndbg_environment()
@@ -1353,8 +1394,33 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.install_pwndbg_uv.call_args_list,
             [mock.call(), mock.call(force=True)],
         )
-        self.assertEqual(self.bootstrap.pwndbg_r2ghidra_probe.call_count, 2)
+        self.assertEqual(self.bootstrap.pwndbg_gdb_import_probe.call_count, 2)
+        self.bootstrap.pwndbg_r2ghidra_probe.assert_called_once_with()
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_decompiler_failure_does_not_reinstall_pwndbg(self):
+        self.bootstrap.remove_legacy_pwndbg_portable = mock.Mock()
+        self.bootstrap.install_pwndbg_uv = mock.Mock(return_value=True)
+        self.bootstrap.configure_pwndbg_system_gdb = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_gdb_import_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["gdb"], 0,
+                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                stderr="",
+            )
+        )
+        self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                ["gdb"], 124,
+                stdout="",
+                stderr="command timed out after 240s",
+            )
+        )
+
+        self.bootstrap.install_pwndbg_environment()
+
+        self.bootstrap.install_pwndbg_uv.assert_called_once_with()
+        self.assertIn("timed out after 240s", self.bootstrap.failures[0])
 
     def test_external_ghidra_fallback_does_not_mask_broken_native_r2pipe(self):
         self.bootstrap.pwndbg_r2ghidra_probe = mock.Mock(
@@ -1368,8 +1434,14 @@ class InstallerTests(unittest.TestCase):
 
     def test_pwndbg_integration_probe_uses_system_gdb_and_real_decompiler(self):
         self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_system_gdb_configured = mock.Mock(return_value=True)
         self.bootstrap.run = mock.Mock(
             side_effect=[
+                subprocess.CompletedProcess(
+                    ["gdb"], 0,
+                    stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                    stderr="",
+                ),
                 subprocess.CompletedProcess(["gcc"], 0, stdout="", stderr=""),
                 subprocess.CompletedProcess(
                     ["gdb"], 0,
@@ -1386,16 +1458,17 @@ class InstallerTests(unittest.TestCase):
         )
 
         self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
-        command = self.bootstrap.run.call_args_list[1].args[0]
+        command = self.bootstrap.run.call_args_list[2].args[0]
         self.assertEqual(command[0], "gdb")
         self.assertNotIn("-nx", command)
+        self.assertIn("set debuginfod enabled off", command)
         self.assertTrue(any("INIT_PWNDBG_OK" in argument for argument in command))
         self.assertTrue(any("INIT_R2PIPE_OK=" in argument for argument in command))
         self.assertIn("help ghidra", command)
         self.assertIn("break main", command)
         self.assertIn("ghidra &main", command)
         self.assertEqual(
-            self.bootstrap.run.call_args_list[1].kwargs["env"],
+            self.bootstrap.run.call_args_list[2].kwargs["env"],
             {"INIT_GHIDRA_PROBE": "1"},
         )
 

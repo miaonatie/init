@@ -320,6 +320,7 @@ class Bootstrap:
         self._rust_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._pwndbg_uv_cache: bool | None = None
         self._pwndbg_backend_cache: bool | None = None
+        self._pwndbg_import_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._pwndbg_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._r2ghidra_available_cache: bool | None = None
         self._r2pipe_available_cache: bool | None = None
@@ -496,7 +497,11 @@ class Bootstrap:
                     timeout=timeout,
                 )
             except subprocess.TimeoutExpired as exc:
-                result = subprocess.CompletedProcess(final, 124, exc.stdout, exc.stderr)
+                stdout = self.output_text(exc.stdout)
+                stderr = self.output_text(exc.stderr)
+                timeout_message = f"command timed out after {exc.timeout:g}s"
+                stderr = f"{stderr.rstrip()}\n{timeout_message}" if stderr else timeout_message
+                result = subprocess.CompletedProcess(final, 124, stdout, stderr)
             if result.returncode == 0:
                 return result
             if attempt < attempts:
@@ -512,6 +517,14 @@ class Bootstrap:
                 stderr=result.stderr,
             )
         return result
+
+    @staticmethod
+    def output_text(value: str | bytes | None) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value
 
     @staticmethod
     def apt_env() -> dict[str, str]:
@@ -1920,10 +1933,11 @@ class Bootstrap:
     def install_pwndbg_uv(self, *, force: bool = False) -> bool:
         if not self.install_uv():
             return False
+        packages_available = self.pwndbg_uv_packages_available()
         if (
             not self.update_existing
             and not force
-            and self.pwndbg_uv_packages_available()
+            and packages_available
             and self.find_command(["pwndbg"]) is not None
         ):
             self.ok(
@@ -1940,17 +1954,27 @@ class Bootstrap:
             return False
         executable = self.uv_executable()
         assert executable is not None
-        command = [
-            executable, "tool", "install",
-            "--python", python_target,
-            "--with", f"r2pipe=={R2PIPE_VERSION}",
-        ]
-        existing_gdbinit = self.pwndbg_gdbinit_path()
-        if self.update_existing:
-            command.extend(["--upgrade", "--reinstall"])
-        elif force or (existing_gdbinit is not None and existing_gdbinit.is_file()):
-            command.append("--reinstall")
-        command.append(PWNDBG_UV_SPEC)
+        if force and packages_available:
+            # This preserves the tool receipt (including r2pipe) while changing
+            # the interpreter used to build the environment.
+            command = [
+                executable, "tool", "upgrade",
+                "--python", python_target,
+                "--reinstall", PWNDBG_TOOL_NAME,
+            ]
+        else:
+            command = [
+                executable, "tool", "install",
+                "--python", python_target,
+                "--with", f"r2pipe=={R2PIPE_VERSION}",
+            ]
+            existing_gdbinit = self.pwndbg_gdbinit_path()
+            if self.update_existing:
+                command.extend(["--upgrade", "--reinstall"])
+            elif existing_gdbinit is not None and existing_gdbinit.is_file():
+                command.append("--reinstall")
+            command.append(PWNDBG_UV_SPEC)
+        command.append("--no-progress")
         self.info(
             f"installing Pwndbg {PWNDBG_VERSION} for system GDB "
             f"with uv using {python_target}"
@@ -1959,12 +1983,12 @@ class Bootstrap:
             command,
             check=False,
             capture=True,
-            network=True,
-            timeout=900,
+            timeout=300,
         )
         self._uv_tool_dir_cache = None
         self._pwndbg_uv_cache = None
         self._pwndbg_backend_cache = None
+        self._pwndbg_import_probe_cache = None
         self._r2pipe_available_cache = None
         if result.returncode != 0:
             details = [
@@ -2447,10 +2471,9 @@ except gdb.error:
     def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
         if self._pwndbg_probe_cache is not None:
             return self._pwndbg_probe_cache
-        if not self.pwndbg_uv_packages_available():
-            self._pwndbg_probe_cache = subprocess.CompletedProcess(
-                ["gdb"], 1, "", "Pwndbg uv environment unavailable"
-            )
+        import_probe = self.pwndbg_gdb_import_probe()
+        if not self.pwndbg_imports_available(import_probe):
+            self._pwndbg_probe_cache = import_probe
             return self._pwndbg_probe_cache
         command = ["gdb"]
         try:
@@ -2474,6 +2497,7 @@ except gdb.error:
                 self._pwndbg_probe_cache = self.run(
                     [
                         *command, "-q", "--batch",
+                        "-ex", "set debuginfod enabled off",
                         "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
                         "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK=' + r2pipe.__file__)",
                         "-ex", "help ghidra",
@@ -2504,31 +2528,87 @@ except gdb.error:
             and "init_ghidra_ok=pwndbg-r2pipe" in output
         )
 
+    @staticmethod
+    def pwndbg_imports_available(result: subprocess.CompletedProcess[str]) -> bool:
+        output = ((result.stdout or "") + (result.stderr or "")).lower()
+        return (
+            result.returncode == 0
+            and "init_pwndbg_ok" in output
+            and "init_r2pipe_ok=" in output
+            and "traceback" not in output
+        )
+
+    def pwndbg_gdb_import_probe(self) -> subprocess.CompletedProcess[str]:
+        if self._pwndbg_import_probe_cache is not None:
+            return self._pwndbg_import_probe_cache
+        if (
+            not self.pwndbg_uv_packages_available()
+            or not self.pwndbg_system_gdb_configured()
+        ):
+            self._pwndbg_import_probe_cache = subprocess.CompletedProcess(
+                ["gdb"], 1, "", "Pwndbg uv environment or GDB configuration unavailable"
+            )
+            return self._pwndbg_import_probe_cache
+        self._pwndbg_import_probe_cache = self.run(
+            [
+                "gdb", "-q", "--batch",
+                "-ex", "set debuginfod enabled off",
+                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
+                "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK=' + r2pipe.__file__)",
+            ],
+            check=False,
+            capture=True,
+            timeout=90,
+        )
+        return self._pwndbg_import_probe_cache
+
+    @staticmethod
+    def probe_error_details(result: subprocess.CompletedProcess[str]) -> str:
+        details = [
+            line.strip()
+            for line in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
+            if line.strip()
+        ]
+        useful = [
+            line for line in details
+            if any(marker in line.lower() for marker in (
+                "ghidra", "r2pipe", "traceback", "error", "failed", "timed out",
+                "importerror", "modulenotfounderror", "undefined symbol",
+                "cannot find", "no such file",
+            ))
+        ]
+        return " | ".join((useful or details)[-3:])[:400]
+
     def install_pwndbg_environment(self) -> None:
         self.remove_legacy_pwndbg_portable()
         if not self.install_pwndbg_uv():
             return
         if not self.configure_pwndbg_system_gdb():
             return
-        self._pwndbg_probe_cache = None
-        probe = self.pwndbg_r2ghidra_probe()
-        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
-        if (
-            "init_pwndbg_ok" not in output
-            or "init_r2pipe_ok=" not in output
-            or "init_ghidra_ok=pwndbg-r2pipe" not in output
-        ):
+        self._pwndbg_import_probe_cache = None
+        import_probe = self.pwndbg_gdb_import_probe()
+        if not self.pwndbg_imports_available(import_probe):
+            reason = self.probe_error_details(import_probe)
+            detail = f" ({reason})" if reason else ""
             self.warn(
-                "system GDB could not use the uv-managed Pwndbg/r2pipe environment; "
+                "system GDB could not import the uv-managed Pwndbg/r2pipe environment"
+                f"{detail}; "
                 "repairing it once"
             )
             if not self.install_pwndbg_uv(force=True):
                 return
             if not self.configure_pwndbg_system_gdb():
                 return
-            self._pwndbg_probe_cache = None
-            probe = self.pwndbg_r2ghidra_probe()
-            output = ((probe.stdout or "") + (probe.stderr or "")).lower()
+            self._pwndbg_import_probe_cache = None
+            import_probe = self.pwndbg_gdb_import_probe()
+        if not self.pwndbg_imports_available(import_probe):
+            details = self.probe_error_details(import_probe)
+            suffix = f": {details}" if details else ""
+            self.failures.append("Pwndbg system GDB import failed" + suffix)
+            return
+        self._pwndbg_probe_cache = None
+        probe = self.pwndbg_r2ghidra_probe()
+        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
         if (
             probe.returncode == 0
             and "init_pwndbg_ok" in output
@@ -2541,21 +2621,8 @@ except gdb.error:
                 "r2pipe and r2ghidra passed real decompilation"
             )
         else:
-            details = [
-                line.strip()
-                for line in ((probe.stderr or "") + "\n" + (probe.stdout or "")).splitlines()
-                if line.strip()
-            ]
-            useful = [
-                line for line in details
-                if any(marker in line.lower() for marker in (
-                    "ghidra", "r2pipe", "traceback", "error", "failed",
-                    "importerror", "modulenotfounderror", "undefined symbol",
-                    "cannot find", "no such file",
-                ))
-            ]
-            selected = (useful or details)[-3:]
-            suffix = f": {' | '.join(selected)[:400]}" if selected else ""
+            details = self.probe_error_details(probe)
+            suffix = f": {details}" if details else ""
             self.failures.append(
                 "Pwndbg r2ghidra bridge verification failed" + suffix
             )
@@ -3138,42 +3205,8 @@ except gdb.error:
     def pwndbg_backend_available(self) -> bool:
         if self._pwndbg_backend_cache is not None:
             return self._pwndbg_backend_cache
-        if self._pwndbg_probe_cache is not None:
-            output = (
-                (self._pwndbg_probe_cache.stdout or "")
-                + (self._pwndbg_probe_cache.stderr or "")
-            ).lower()
-            self._pwndbg_backend_cache = (
-                self._pwndbg_probe_cache.returncode == 0
-                and "init_pwndbg_ok" in output
-                and "init_r2pipe_ok=" in output
-                and "traceback" not in output
-            )
-            return self._pwndbg_backend_cache
-        if (
-            not self.pwndbg_uv_packages_available()
-            or not self.pwndbg_system_gdb_configured()
-        ):
-            self._pwndbg_backend_cache = False
-            return False
-        probe = self.run(
-            [
-                "gdb", "-q", "--batch",
-                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
-                "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK')",
-                "/bin/true",
-            ],
-            check=False,
-            capture=True,
-            timeout=90,
-        )
-        output = ((probe.stdout or "") + (probe.stderr or "")).lower()
-        self._pwndbg_backend_cache = (
-            probe.returncode == 0
-            and "init_pwndbg_ok" in output
-            and "init_r2pipe_ok" in output
-            and "traceback" not in output
-        )
+        probe = self.pwndbg_gdb_import_probe()
+        self._pwndbg_backend_cache = self.pwndbg_imports_available(probe)
         return self._pwndbg_backend_cache
 
     def install_ctf_toolchain(self) -> None:
