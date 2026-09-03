@@ -1,4 +1,4 @@
-# init v3.26
+# init v3.27
 
 面向 Ubuntu 24.04+ 和 Kali Linux/WSL 的 CTF 工作站初始化工具。
 
@@ -45,6 +45,7 @@ python3 init.py --update
 - 使用 `uv tool` 隔离管理当前官方稳定版 Pwndbg 2026.07.29 的 Python 依赖。
 - 同时比较系统 GDB 与系统 Python 的版本和 `INSTSONAME`，优先使用 ABI 完全匹配的系统 Python 绝对路径创建 Pwndbg 环境。
 - 安装 Pwndbg 时通过 `--with r2pipe==1.9.8` 把 r2pipe 放入同一环境。
+- `~/.gdbinit` 会把 uv 环境的 `site-packages` 放到 GDB Python 导入路径最前面，再调用 Pwndbg 官方初始化入口；直接运行系统 `gdb` 也不会误用 `/usr/local` 中的同名包。
 - 分开验证 uv 包、系统 GDB 导入和 r2ghidra 反编译；只有 GDB 无法导入 Pwndbg/r2pipe 时才修复 Python 环境。
 - GDB 探测期间关闭 Debuginfod，避免下载调试源码超时后被误判成安装损坏。
 - 已有 uv 工具需要切换 Python 时使用 `uv tool upgrade --python` 重建；健康复跑不会联网或重装。

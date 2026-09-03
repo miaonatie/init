@@ -1212,16 +1212,64 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("gdb", command)
         self.assertTrue(any("import r2pipe" in argument for argument in command))
 
+    def test_pwndbg_site_packages_must_be_inside_uv_tool_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tool_root = Path(directory) / "pwndbg"
+            python = tool_root / "bin" / "python"
+            site_packages = tool_root / "lib" / "python3.13" / "site-packages"
+            python.parent.mkdir(parents=True)
+            python.touch(mode=0o755)
+            site_packages.mkdir(parents=True)
+            self.bootstrap.pwndbg_tool_python = mock.Mock(return_value=python)
+            self.bootstrap.pwndbg_tool_root = mock.Mock(return_value=tool_root)
+            self.bootstrap.run = mock.Mock(
+                return_value=subprocess.CompletedProcess(
+                    [str(python)], 0, stdout=f"{site_packages}\n", stderr=""
+                )
+            )
+
+            self.assertEqual(
+                self.bootstrap.pwndbg_site_packages_path(), site_packages.resolve()
+            )
+
+            self.bootstrap._pwndbg_site_packages_cache = None
+            self.bootstrap.run.return_value = subprocess.CompletedProcess(
+                [str(python)], 0,
+                stdout="/usr/local/lib/python3.13/dist-packages\n",
+                stderr="",
+            )
+            self.assertIsNone(self.bootstrap.pwndbg_site_packages_path())
+
+    def test_system_r2pipe_does_not_satisfy_uv_import_probe(self):
+        result = subprocess.CompletedProcess(
+            ["gdb"], 0,
+            stdout=(
+                "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                "INIT_R2PIPE_OK=/usr/local/lib/python3.13/dist-packages/r2pipe/__init__.py\n"
+                "INIT_R2PIPE_UV_OK=False\n"
+            ),
+            stderr="",
+        )
+
+        self.assertFalse(self.bootstrap.pwndbg_imports_available(result))
+
     def test_pwndbg_system_gdb_configuration_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             tool_init = root / "tools" / "pwndbg" / "share" / "pwndbg" / "gdbinit.py"
             tool_init.parent.mkdir(parents=True)
             tool_init.touch()
+            tool_root = root / "tools" / "pwndbg"
+            site_packages = tool_root / "lib" / "python3.13" / "site-packages"
+            site_packages.mkdir(parents=True)
             bridge = root / "share" / "r2ghidra.py"
             gdbinit = root / ".gdbinit"
             gdbinit.write_text("set height 0\n", encoding="utf-8")
             self.bootstrap.pwndbg_gdbinit_path = mock.Mock(return_value=tool_init)
+            self.bootstrap.pwndbg_tool_root = mock.Mock(return_value=tool_root)
+            self.bootstrap.pwndbg_site_packages_path = mock.Mock(
+                return_value=site_packages
+            )
             with (
                 mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", bridge),
                 mock.patch.object(MODULE, "GDBINIT", gdbinit),
@@ -1235,7 +1283,11 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertIn("set height 0", second)
             self.assertEqual(second.count(MODULE.PWNDBG_GDBINIT_BEGIN), 1)
-            self.assertIn(f"source {tool_init}", second)
+            self.assertNotIn(f"source {tool_init}", second)
+            self.assertIn(f"_init_pwndbg_venv = {str(tool_root)!r}", second)
+            self.assertIn(f"_init_pwndbg_site = {str(site_packages)!r}", second)
+            self.assertIn("sys.path.insert(0, _init_pwndbg_site)", second)
+            self.assertIn("from pwndbginit.gdbinit import main_try", second)
             self.assertIn("set debuginfod enabled on", second)
             self.assertIn("set disassembly-flavor intel", second)
             bridge_text = bridge.read_text(encoding="utf-8")
@@ -1300,11 +1352,15 @@ class InstallerTests(unittest.TestCase):
     def test_pwndbg_backend_probe_uses_system_gdb_and_is_cached(self):
         self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.pwndbg_system_gdb_configured = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_tool_root = mock.Mock(return_value=Path("/tool"))
         self.bootstrap.run = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 ["gdb"],
                 0,
-                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                stdout=(
+                    "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                    "INIT_R2PIPE_OK=/tool/r2pipe.py\nINIT_R2PIPE_UV_OK=True\n"
+                ),
                 stderr="",
             )
         )
@@ -1320,7 +1376,10 @@ class InstallerTests(unittest.TestCase):
     def test_pwndbg_backend_reuses_import_probe(self):
         self.bootstrap._pwndbg_import_probe_cache = subprocess.CompletedProcess(
             ["gdb"], 0,
-            stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+            stdout=(
+                "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                "INIT_R2PIPE_OK=/tool/r2pipe.py\nINIT_R2PIPE_UV_OK=True\n"
+            ),
             stderr="",
         )
         self.bootstrap.run = mock.Mock()
@@ -1335,7 +1394,11 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.pwndbg_gdb_import_probe = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 ["gdb"], 0,
-                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe/__init__.py\n",
+                stdout=(
+                    "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                    "INIT_R2PIPE_OK=/tool/r2pipe/__init__.py\n"
+                    "INIT_R2PIPE_UV_OK=True\n"
+                ),
                 stderr="",
             )
         )
@@ -1372,7 +1435,10 @@ class InstallerTests(unittest.TestCase):
                 ),
                 subprocess.CompletedProcess(
                     ["gdb"], 0,
-                    stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                    stdout=(
+                        "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                        "INIT_R2PIPE_OK=/tool/r2pipe.py\nINIT_R2PIPE_UV_OK=True\n"
+                    ),
                     stderr="",
                 ),
             ]
@@ -1405,7 +1471,10 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.pwndbg_gdb_import_probe = mock.Mock(
             return_value=subprocess.CompletedProcess(
                 ["gdb"], 0,
-                stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                stdout=(
+                    "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                    "INIT_R2PIPE_OK=/tool/r2pipe.py\nINIT_R2PIPE_UV_OK=True\n"
+                ),
                 stderr="",
             )
         )
@@ -1435,11 +1504,15 @@ class InstallerTests(unittest.TestCase):
     def test_pwndbg_integration_probe_uses_system_gdb_and_real_decompiler(self):
         self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.pwndbg_system_gdb_configured = mock.Mock(return_value=True)
+        self.bootstrap.pwndbg_tool_root = mock.Mock(return_value=Path("/tool"))
         self.bootstrap.run = mock.Mock(
             side_effect=[
                 subprocess.CompletedProcess(
                     ["gdb"], 0,
-                    stdout="INIT_PWNDBG_OK\nINIT_R2PIPE_OK=/tool/r2pipe.py\n",
+                    stdout=(
+                        "INIT_PWNDBG_OK=/tool/pwndbg.py\nINIT_PWNDBG_UV_OK=True\n"
+                        "INIT_R2PIPE_OK=/tool/r2pipe.py\nINIT_R2PIPE_UV_OK=True\n"
+                    ),
                     stderr="",
                 ),
                 subprocess.CompletedProcess(["gcc"], 0, stdout="", stderr=""),

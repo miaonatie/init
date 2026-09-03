@@ -325,6 +325,7 @@ class Bootstrap:
         self._r2ghidra_available_cache: bool | None = None
         self._r2pipe_available_cache: bool | None = None
         self._uv_tool_dir_cache: Path | None = None
+        self._pwndbg_site_packages_cache: Path | None = None
         self._gdb_python_abi_cache: tuple[str, str] | None = None
         self._gdb_python_target_cache: str | None = None
         self._glibc_runtime_cache: bool | None = None
@@ -1894,6 +1895,38 @@ class Bootstrap:
         executable = tool_dir / PWNDBG_TOOL_NAME / "bin" / "python"
         return executable if executable.is_file() and os.access(executable, os.X_OK) else None
 
+    def pwndbg_tool_root(self) -> Path | None:
+        tool_dir = self.uv_tool_dir()
+        return tool_dir / PWNDBG_TOOL_NAME if tool_dir is not None else None
+
+    def pwndbg_site_packages_path(self) -> Path | None:
+        if self._pwndbg_site_packages_cache is not None:
+            return self._pwndbg_site_packages_cache
+        python = self.pwndbg_tool_python()
+        root = self.pwndbg_tool_root()
+        if python is None or root is None:
+            return None
+        result = self.run(
+            [
+                str(python), "-c",
+                "import sysconfig; print(sysconfig.get_path('purelib') or '')",
+            ],
+            check=False,
+            capture=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        if not lines:
+            return None
+        candidate = Path(lines[-1]).expanduser().resolve()
+        root = root.resolve()
+        if not candidate.is_dir() or not candidate.is_relative_to(root):
+            return None
+        self._pwndbg_site_packages_cache = candidate
+        return self._pwndbg_site_packages_cache
+
     def pwndbg_uv_packages_available(self) -> bool:
         if self._pwndbg_uv_cache is not None:
             return self._pwndbg_uv_cache
@@ -1986,6 +2019,7 @@ class Bootstrap:
             timeout=300,
         )
         self._uv_tool_dir_cache = None
+        self._pwndbg_site_packages_cache = None
         self._pwndbg_uv_cache = None
         self._pwndbg_backend_cache = None
         self._pwndbg_import_probe_cache = None
@@ -2419,9 +2453,19 @@ except gdb.error:
 
     def configure_pwndbg_system_gdb(self) -> bool:
         gdbinit = self.pwndbg_gdbinit_path()
-        if gdbinit is None or not gdbinit.is_file():
-            self.failures.append("Pwndbg configuration failed: uv gdbinit.py was not found")
+        tool_root = self.pwndbg_tool_root()
+        site_packages = self.pwndbg_site_packages_path()
+        if (
+            gdbinit is None
+            or not gdbinit.is_file()
+            or tool_root is None
+            or site_packages is None
+        ):
+            self.failures.append(
+                "Pwndbg configuration failed: uv tool environment paths were not found"
+            )
             return False
+        tool_bin = tool_root / "bin"
         body = (
             "set pagination off\n"
             "set confirm off\n"
@@ -2432,7 +2476,20 @@ except gdb.error:
             "set debuginfod enabled on\n"
             "set debuginfod verbose 0\n"
             "set debuginfod urls https://debuginfod.pwndbg.re\n"
-            f"source {gdbinit}\n"
+            "python\n"
+            "import os, site, sys\n"
+            f"_init_pwndbg_venv = {str(tool_root)!r}\n"
+            f"_init_pwndbg_site = {str(site_packages)!r}\n"
+            f"_init_pwndbg_bin = {str(tool_bin)!r}\n"
+            "site.addsitedir(_init_pwndbg_site)\n"
+            "if _init_pwndbg_site in sys.path: sys.path.remove(_init_pwndbg_site)\n"
+            "sys.path.insert(0, _init_pwndbg_site)\n"
+            "os.environ['PATH'] = _init_pwndbg_bin + os.pathsep + os.environ.get('PATH', '')\n"
+            "sys.prefix = _init_pwndbg_venv\n"
+            "sys.exec_prefix = _init_pwndbg_venv\n"
+            "from pwndbginit.gdbinit import main_try as _init_pwndbg_main\n"
+            "_init_pwndbg_main()\n"
+            "end\n"
             f"source {PWNDBG_BRIDGE_SCRIPT}"
         )
         try:
@@ -2450,7 +2507,15 @@ except gdb.error:
 
     def pwndbg_system_gdb_configured(self) -> bool:
         gdbinit = self.pwndbg_gdbinit_path()
-        if gdbinit is None or not gdbinit.is_file() or not PWNDBG_BRIDGE_SCRIPT.is_file():
+        tool_root = self.pwndbg_tool_root()
+        site_packages = self.pwndbg_site_packages_path()
+        if (
+            gdbinit is None
+            or not gdbinit.is_file()
+            or tool_root is None
+            or site_packages is None
+            or not PWNDBG_BRIDGE_SCRIPT.is_file()
+        ):
             return False
         try:
             text = GDBINIT.read_text(encoding="utf-8")
@@ -2461,7 +2526,9 @@ except gdb.error:
             for marker in (
                 PWNDBG_GDBINIT_BEGIN,
                 PWNDBG_GDBINIT_END,
-                f"source {gdbinit}",
+                f"_init_pwndbg_venv = {str(tool_root)!r}",
+                f"_init_pwndbg_site = {str(site_packages)!r}",
+                "from pwndbginit.gdbinit import main_try as _init_pwndbg_main",
                 f"source {PWNDBG_BRIDGE_SCRIPT}",
                 "set debuginfod enabled on",
                 "set debuginfod urls https://debuginfod.pwndbg.re",
@@ -2533,8 +2600,10 @@ except gdb.error:
         output = ((result.stdout or "") + (result.stderr or "")).lower()
         return (
             result.returncode == 0
-            and "init_pwndbg_ok" in output
+            and "init_pwndbg_ok=" in output
+            and "init_pwndbg_uv_ok=true" in output
             and "init_r2pipe_ok=" in output
+            and "init_r2pipe_uv_ok=true" in output
             and "traceback" not in output
         )
 
@@ -2549,12 +2618,33 @@ except gdb.error:
                 ["gdb"], 1, "", "Pwndbg uv environment or GDB configuration unavailable"
             )
             return self._pwndbg_import_probe_cache
+        tool_root = self.pwndbg_tool_root()
+        if tool_root is None:
+            self._pwndbg_import_probe_cache = subprocess.CompletedProcess(
+                ["gdb"], 1, "", "Pwndbg uv tool root unavailable"
+            )
+            return self._pwndbg_import_probe_cache
+        root_literal = repr(str(tool_root.resolve()))
         self._pwndbg_import_probe_cache = self.run(
             [
                 "gdb", "-q", "--batch",
                 "-ex", "set debuginfod enabled off",
-                "-ex", "pi import pwndbg; print('INIT_PWNDBG_OK')",
-                "-ex", "pi import r2pipe; print('INIT_R2PIPE_OK=' + r2pipe.__file__)",
+                "-ex", (
+                    "pi import pathlib,pwndbg; "
+                    f"_init_root=pathlib.Path({root_literal}); "
+                    "_init_file=pathlib.Path(pwndbg.__file__).resolve(); "
+                    "print('INIT_PWNDBG_OK=' + str(_init_file)); "
+                    "print('INIT_PWNDBG_UV_OK=' + "
+                    "str(_init_file.is_relative_to(_init_root)))"
+                ),
+                "-ex", (
+                    "pi import pathlib,r2pipe; "
+                    f"_init_root=pathlib.Path({root_literal}); "
+                    "_init_file=pathlib.Path(r2pipe.__file__).resolve(); "
+                    "print('INIT_R2PIPE_OK=' + str(_init_file)); "
+                    "print('INIT_R2PIPE_UV_OK=' + "
+                    "str(_init_file.is_relative_to(_init_root)))"
+                ),
             ],
             check=False,
             capture=True,
@@ -3458,15 +3548,27 @@ except gdb.error:
                 else:
                     ok_all = False
                     message = "verification failed: Pwndbg r2ghidra integration unavailable"
-                    if message not in self.failures:
+                    has_detail = any(
+                        failure.startswith("Pwndbg r2ghidra bridge verification failed")
+                        for failure in self.failures
+                    )
+                    if not has_detail and message not in self.failures:
                         self.failures.append(message)
-                    self.error(message)
+                    self.error(
+                        message + (" (see detailed failure above)" if has_detail else "")
+                    )
             else:
                 ok_all = False
                 message = "verification failed: system GDB Pwndbg auto-load unavailable"
-                if message not in self.failures:
+                has_detail = any(
+                    failure.startswith("Pwndbg system GDB import failed")
+                    for failure in self.failures
+                )
+                if not has_detail and message not in self.failures:
                     self.failures.append(message)
-                self.error(message)
+                self.error(
+                    message + (" (see detailed failure above)" if has_detail else "")
+                )
 
         node_probe = self.node_environment_probe()
         node_output = (node_probe.stdout or "").lower()
