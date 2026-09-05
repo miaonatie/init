@@ -1,4 +1,4 @@
-# init v3.28
+# init v3.28.1
 
 面向 Ubuntu 24.04+ 和 Kali Linux/WSL 的 CTF 工作站初始化工具。
 
@@ -28,7 +28,7 @@ python3 init.py --update
 
 - `~/.vimrc`：基础 Vim 受管配置块。
 - `~/.tmux.conf`：基础 Tmux 受管配置块。
-- `~/.gdbinit`：系统 GDB 自动加载 Pwndbg、Debuginfod 和 r2ghidra 快捷命令。
+- `~/.gdbinit`：系统 GDB 自动加载 Pwndbg、Debuginfod 和 r2ghidra 快捷命令，并在输入提示符前留两行空白。
 - `~/.bashrc`、`~/.zshrc`：NVM、Rust 和 Oh My Zsh 配置；保留其他个人内容。
 - `~/.oh-my-zsh`：Oh My Zsh 及两个外部插件。
 - `~/.local/bin`、`~/.local/share/uv/tools/pwndbg`：uv 和 Pwndbg。
@@ -60,6 +60,9 @@ python3 init.py --update
 gdb ./chall
 ```
 
+每次返回 `pwndbg>` 提示符前自动空两行，保留原有调试信息刷新和提示符颜色。
+留白代码直接写入 `~/.gdbinit` 的现有受管块，不生成额外配置文件，也不启用分屏；重复加载不会叠加空行。
+
 也可以使用 uv 提供的入口：
 
 ```bash
@@ -89,6 +92,18 @@ python3 init.py --remove-portable-pwndbg
 ```
 
 该操作只移除旧脚本的受管配置块和已确认属于官方便携版的链接/目录，保留 `.gdbinit`、`.bashrc` 和 `.zshrc` 中的其他个人配置。
+
+## IPython
+
+通过 APT 安装 `python3-ipython`，已安装时跳过。若发行版只提供 `ipython3`，
+脚本会在缺少 `ipython` 时建立 `/usr/local/bin/ipython` 命令链接，保留已有命令，
+并在最终检查中运行 `ipython --version` 验证可用性。
+
+```bash
+ipython
+```
+
+可直接使用补全、历史记录和交互式 Python，例如输入 `from pwn import *` 后计算地址或构造数据。
 
 ## HyFetch 和后端
 

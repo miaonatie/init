@@ -240,6 +240,7 @@ DOCKER_PACKAGES = [
 
 COMMAND_PROBE_ARGUMENTS = {
     "python3": ["--version"],
+    "ipython": ["--version"],
     "git": ["--version"],
     "gcc": ["--version"],
     "g++": ["--version"],
@@ -797,7 +798,10 @@ class Bootstrap:
         return False
 
     def install_command_links(self) -> None:
-        for source, target in (("batcat", "bat"), ("fdfind", "fd"), ("7zz", "7z")):
+        for source, target in (
+            ("batcat", "bat"), ("fdfind", "fd"), ("7zz", "7z"),
+            ("ipython3", "ipython"),
+        ):
             if shutil.which(target):
                 continue
             executable = shutil.which(source)
@@ -2097,7 +2101,8 @@ class Bootstrap:
         managed = f"{begin}\n{body.rstrip()}\n{end}"
         pattern = re.compile(rf"(?ms)^{re.escape(begin)}$.*?^{re.escape(end)}$")
         if pattern.search(existing):
-            updated = pattern.sub(managed, existing)
+            # Configuration is literal text, not a regex replacement template.
+            updated = pattern.sub(lambda _match: managed, existing)
         else:
             updated = existing.rstrip("\n")
             if updated:
@@ -2509,6 +2514,19 @@ except gdb.error:
             "    from pwndbginit.gdbinit import main_try as _init_pwndbg_main\n"
             "    _init_pwndbg_main()\n"
             "end\n"
+            "python\n"
+            "import gdb\n"
+            "import pwndbg.gdblib.prompt as _init_pwndbg_prompt\n"
+            "# Leave two blank lines before the prompt; preserve Pwndbg refresh/colors.\n"
+            "if not hasattr(_init_pwndbg_prompt, '_original_prompt_hook'):\n"
+            "    _init_pwndbg_prompt._original_prompt_hook = _init_pwndbg_prompt.prompt_hook\n"
+            "def _init_spaced_prompt(*args):\n"
+            "    _init_pwndbg_prompt._original_prompt_hook(*args)\n"
+            "    gdb.write('\\n' * 2)\n"
+            "if gdb.prompt_hook is _init_pwndbg_prompt.prompt_hook:\n"
+            "    gdb.prompt_hook = _init_spaced_prompt\n"
+            "_init_pwndbg_prompt.prompt_hook = _init_spaced_prompt\n"
+            "end\n"
             f"source {PWNDBG_BRIDGE_SCRIPT}"
         )
         try:
@@ -2550,6 +2568,7 @@ except gdb.error:
                 f"_init_pwndbg_site = {str(site_packages)!r}",
                 "if 'pwndbg' not in sys.modules:",
                 "from pwndbginit.gdbinit import main_try as _init_pwndbg_main",
+                "_init_pwndbg_prompt.prompt_hook = _init_spaced_prompt",
                 f"source {PWNDBG_BRIDGE_SCRIPT}",
                 "set debuginfod enabled on",
                 "set debuginfod urls https://debuginfod.pwndbg.re",
@@ -3387,6 +3406,7 @@ except gdb.error:
     def verify(self) -> bool:
         checks = [
             ("python3", ["python3"]),
+            ("ipython", ["ipython"]),
             ("git", ["git"]),
             ("gcc", ["gcc"]),
             ("g++", ["g++"]),
