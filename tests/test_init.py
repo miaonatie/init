@@ -3,6 +3,7 @@ import io
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -172,6 +173,26 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
         self.assertTrue(install_call.kwargs["sudo"])
+
+    def test_ipython_command_link_preserves_existing_installation(self):
+        for existing in (None, "/custom/bin/ipython"):
+            with self.subTest(existing=existing):
+                self.bootstrap.run = mock.Mock(
+                    return_value=subprocess.CompletedProcess(["ln"], 0)
+                )
+                def which(name):
+                    if name == "ipython":
+                        return existing
+                    return "/usr/bin/" + name
+                with mock.patch.object(MODULE.shutil, "which", side_effect=which):
+                    self.bootstrap.install_command_links()
+                if existing:
+                    self.bootstrap.run.assert_not_called()
+                else:
+                    self.bootstrap.run.assert_called_once_with(
+                        ["ln", "-sf", "/usr/bin/ipython3", "/usr/local/bin/ipython"],
+                        sudo=True, check=False,
+                    )
 
     def test_python_install_skips_when_imports_are_present(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 0, stdout="", stderr="")
@@ -1295,6 +1316,35 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("from pwndbginit.gdbinit import main_try", second)
             self.assertIn("set debuginfod enabled on", second)
             self.assertIn("set disassembly-flavor intel", second)
+            spacing_code = second.split("\npython\n")[-1].split("\nend\n")[0]
+            # Execute the generated block against both GDB startup paths and
+            # re-source it: context runs once, then exactly two blank lines.
+            for initial in (True, False):
+                with self.subTest(initial_prompt=initial):
+                    events = []
+                    gdb = types.ModuleType("gdb")
+                    pwndbg = types.ModuleType("pwndbg")
+                    gdblib = types.ModuleType("pwndbg.gdblib")
+                    prompt = types.ModuleType("pwndbg.gdblib.prompt")
+                    pwndbg.gdblib = gdblib
+                    gdblib.prompt = prompt
+                    prompt.prompt_hook = lambda *args: events.append("context")
+                    def initial_hook(*args):
+                        prompt.prompt_hook(*args)
+                        gdb.prompt_hook = prompt.prompt_hook
+                    gdb.prompt_hook = initial_hook if initial else prompt.prompt_hook
+                    gdb.write = events.append
+                    modules = {
+                        "gdb": gdb, "pwndbg": pwndbg,
+                        "pwndbg.gdblib": gdblib, "pwndbg.gdblib.prompt": prompt,
+                    }
+                    with mock.patch.dict(sys.modules, modules):
+                        namespace = {}
+                        for _ in range(3):
+                            exec(spacing_code, namespace)
+                            events.clear()
+                            gdb.prompt_hook("pwndbg> ")
+                            self.assertEqual(events, ["context", "\n\n"])
             bridge_text = bridge.read_text(encoding="utf-8")
             self.assertIn("import r2pipe as _INIT_R2PIPE", bridge_text)
             self.assertIn('super().__init__("ghidra"', bridge_text)
