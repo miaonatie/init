@@ -1853,10 +1853,50 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertTrue(self.bootstrap.executable_usable("tool", []))
 
+    def test_go_version_rejects_failed_command(self):
+        self.bootstrap.find_command = mock.Mock(return_value="/usr/bin/go")
+        self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess(
+            ["go", "version"], 1, stdout="go version go1.25.0 linux/amd64"
+        ))
+        self.assertIsNone(self.bootstrap.go_version())
+
+    def test_go_existing_install_configures_shells_idempotently(self):
+        self.bootstrap.go_version = mock.Mock(return_value="go version go1.25.0 linux/amd64")
+        self.bootstrap.find_command = mock.Mock(return_value="/usr/bin/go")
+        self.bootstrap.apt_install = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bashrc, zshrc = root / "bashrc", root / "zshrc"
+            bashrc.write_text("# user settings\n")
+            self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess(
+                ["go", "env"], 0, stdout=f"{root / 'custom bin'}\n{root / 'go'}\n"
+            ))
+            with mock.patch.object(MODULE, "BASHRC", bashrc), mock.patch.object(MODULE, "ZSHRC", zshrc), mock.patch.dict(MODULE.os.environ):
+                self.bootstrap.install_go_environment()
+                first = bashrc.read_text()
+                self.bootstrap.install_go_environment()
+                self.assertEqual(first, bashrc.read_text())
+                self.assertIn("# user settings", first)
+                self.assertIn(str(root / "custom bin"), MODULE.os.environ["PATH"].split(":"))
+                result = subprocess.run(
+                    ["bash", "-c", '. "$1"; . "$1"; printf "%s" "$PATH"', "bash", str(bashrc)],
+                    env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=True,
+                )
+                self.assertEqual(result.stdout.split(":").count(str(root / "custom bin")), 1)
+            self.bootstrap.apt_install.assert_not_called()
+
+    def test_go_missing_install_failure_does_not_write_shells(self):
+        self.bootstrap.go_version = mock.Mock(return_value=None)
+        self.bootstrap.apt_install = mock.Mock(return_value=False)
+        self.bootstrap.update_managed_block = mock.Mock()
+        self.bootstrap.install_go_environment()
+        self.bootstrap.apt_install.assert_called_once_with(["golang-go"], "Go toolchain", required=True)
+        self.bootstrap.update_managed_block.assert_not_called()
+
     def test_ctf_toolchain_installs_uv_pwndbg_after_r2ghidra(self):
         names = [
             "install_python2_legacy", "install_python_tools", "install_ruby_tools",
-            "install_node_environment", "install_rust_environment",
+            "install_node_environment", "install_go_environment", "install_rust_environment",
             "install_radare2", "install_r2ghidra", "install_pwndbg_environment",
             "install_helper_repositories",
         ]

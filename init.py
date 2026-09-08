@@ -204,6 +204,9 @@ RUSTUP_HOME = HOME / ".rustup"
 RUST_PROFILE_BEGIN = "# >>> init rustup >>>"
 RUST_PROFILE_END = "# <<< init rustup <<<"
 
+GO_PROFILE_BEGIN = "# >>> init go >>>"
+GO_PROFILE_END = "# <<< init go <<<"
+
 RADARE2_MIN_VERSION = (6, 1, 4)
 RADARE2_URL = "https://github.com/radareorg/radare2.git"
 
@@ -458,6 +461,7 @@ class Bootstrap:
             Path("/usr/local/bin"),
             HOME / ".local" / "bin",
             HOME / ".cargo" / "bin",
+            Path("/usr/local/go/bin"),
         ]
         current = os.environ.get("PATH", "").split(os.pathsep)
         for candidate in reversed(candidates):
@@ -2981,6 +2985,55 @@ except gdb.error:
             return
         self.ok("Node.js LTS, npm, Corepack, pnpm and Yarn installed with nvm")
 
+    def go_version(self) -> str | None:
+        go = self.find_command(["go"])
+        if go is None:
+            return None
+        result = self.run(
+            [go, "version"], check=False, capture=True, timeout=30,
+            env={"GOTOOLCHAIN": "local"},
+        )
+        version = (result.stdout or "").strip()
+        return version if result.returncode == 0 and version.startswith("go version go") else None
+
+    def install_go_environment(self) -> None:
+        version = self.go_version()
+        if version is None:
+            if not self.apt_install(["golang-go"], "Go toolchain", required=True):
+                return
+            version = self.go_version()
+        if version is None:
+            self.failures.append("Go installation failed: go version unavailable")
+            return
+        go = self.find_command(["go"])
+        result = self.run(
+            [go, "env", "GOBIN", "GOPATH"], check=False, capture=True,
+            timeout=30, env={"GOTOOLCHAIN": "local"},
+        )
+        values = (result.stdout or "").splitlines()
+        if result.returncode != 0 or len(values) != 2 or not values[1].strip():
+            self.failures.append("Go environment configuration failed: cannot read GOBIN/GOPATH")
+            return
+        bin_dir = values[0].strip() or str(Path(values[1].split(os.pathsep)[0]) / "bin")
+        paths = list(dict.fromkeys([str(Path(go).parent), bin_dir]))
+        body = "\n".join(
+            f'case ":$PATH:" in *:{shlex.quote(path)}:*) ;; '
+            f'*) export PATH={shlex.quote(path)}:"$PATH" ;; esac'
+            for path in paths
+        )
+        try:
+            for profile in (BASHRC, ZSHRC):
+                self.update_managed_block(profile, GO_PROFILE_BEGIN, GO_PROFILE_END, body)
+        except OSError as exc:
+            self.failures.append(f"Go shell configuration failed: {exc}")
+            return
+        current = os.environ.get("PATH", "").split(os.pathsep)
+        for path in paths:
+            if path not in current:
+                current.append(path)
+        os.environ["PATH"] = os.pathsep.join(current)
+        self.ok(f"Go toolchain: {version}; tool commands: {bin_dir}")
+
     @staticmethod
     def rust_env() -> dict[str, str]:
         return {
@@ -3383,6 +3436,7 @@ except gdb.error:
         self.install_python_tools()
         self.install_ruby_tools()
         self.install_node_environment()
+        self.install_go_environment()
         self.install_rust_environment()
         if self.install_radare2():
             self.install_r2ghidra()
@@ -3418,6 +3472,7 @@ except gdb.error:
             ("GNU linker", ["ld"]),
             ("java", ["java"]),
             ("javac", ["javac"]),
+            ("gofmt", ["gofmt"]),
             ("ruby", ["ruby"]),
             ("gem", ["gem"]),
             ("bundler", ["bundle", "bundler"]),
@@ -3663,6 +3718,16 @@ except gdb.error:
                 self.error(
                     message + (" (see detailed failure above)" if has_detail else "")
                 )
+
+        go_version = self.go_version()
+        if go_version:
+            self.ok(f"Go toolchain: {go_version}")
+        else:
+            ok_all = False
+            message = "verification failed: working Go toolchain unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
 
         node_probe = self.node_environment_probe()
         node_output = (node_probe.stdout or "").lower()
