@@ -33,9 +33,9 @@ jobs:
           docker run --rm -e TERM=xterm -v "$PWD:/src:ro" \
             -v /etc/ssl/certs/ca-certificates.crt:/tmp/host-ca.crt:ro \
             -w /src ${{ matrix.image }} bash -ec '
-            if [ -f /etc/apt/sources.list ]; then
-              sed -i "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g" /etc/apt/sources.list
-            fi
+            for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
+              [ ! -f "$source" ] || sed -i "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g" "$source"
+            done
             apt-get -o Acquire::Retries=3 -o Acquire::https::CaInfo=/tmp/host-ca.crt update -qq
             apt-get -o Acquire::https::CaInfo=/tmp/host-ca.crt install -y --no-install-recommends python3 ca-certificates curl
             python3 init.py --help
