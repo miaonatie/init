@@ -39,8 +39,13 @@ jobs:
           assert b.supported_distro(b.distro), b.distro
           assert b.run(["true"], capture=True).returncode == 0
           b.apt_updated = True
-          packages = b.compatible_packages(init.REQUIRED_APT)
-          missing = [p for p in packages if not b.package_available(p)]
+          # Query aliases individually, then check the core set in one APT call.
+          aliases = ["7zip", "bind9-dnsutils", "libncurses-dev", "python-is-python3", "checksec"]
+          packages = b.compatible_packages(aliases)
+          packages += [p for p in init.REQUIRED_APT if p not in aliases]
+          result = b.run(["apt-cache", "--no-all-versions", "show"] + packages, capture=True, check=False)
+          available = {line.split(": ", 1)[1] for line in result.stdout.splitlines() if line.startswith("Package: ")}
+          missing = [p for p in packages if p not in available]
           assert not missing, missing
           PY
           '

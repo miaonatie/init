@@ -483,8 +483,8 @@ class Bootstrap:
                 selected.append(package)
             elif package in aliases:
                 selected.append(aliases[package])
-            elif package == "python-is-python3":
-                pass  # install_command_links provides python when absent.
+            elif package in {"python-is-python3", "checksec"}:
+                pass  # Command fallbacks provide python and pwntools checksec.
             elif optional:
                 self.skip_compat(package, "unavailable in this Ubuntu release's APT repositories")
             else:
@@ -1610,6 +1610,17 @@ class Bootstrap:
             )
             return
         self.ok(f"Python CTF tools installed for {python} and launch-verified")
+
+    def install_checksec_fallback(self) -> None:
+        if not self.ubuntu_before("24.04") or self.find_usable_command(["checksec"], ["--help"]):
+            return
+        pwn = Path(self.system_python()).parent / "pwn"
+        if not pwn.is_file():
+            self.failures.append("checksec fallback requires the pwntools command")
+            return
+        content = "#!/bin/sh\nexec " + shlex.quote(str(pwn)) + " checksec \"$@\"\n"
+        if not self.install_command_wrapper(Path("/usr/local/bin/checksec"), content):
+            self.failures.append("pwntools checksec command installation failed")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -3517,6 +3528,7 @@ except gdb.error:
         self.install_python2_legacy()
         if self.prepare_python_tools():
             self.install_python_tools()
+            self.install_checksec_fallback()
         self.install_ruby_tools()
         self.install_node_environment()
         self.install_go_environment()

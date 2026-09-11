@@ -130,6 +130,21 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "\u00e9\ufffd")
 
+    def test_checksec_fallback_uses_the_isolated_pwntools_command(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.find_usable_command = mock.Mock(return_value=None)
+        self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE, "HOME", Path(directory)):
+            pwn = Path(self.bootstrap.system_python()).parent / "pwn"
+            pwn.parent.mkdir(parents=True)
+            pwn.touch()
+            self.bootstrap.install_checksec_fallback()
+            call = self.bootstrap.install_command_wrapper.call_args
+            self.assertEqual(call.args[0], Path("/usr/local/bin/checksec"))
+            self.assertIn(str(pwn), call.args[1])
+            self.assertIn('checksec "$@"', call.args[1])
+            self.assertEqual(subprocess.run(["sh", "-n"], input=call.args[1], text=True).returncode, 0)
+
     def test_python36_grammar_and_annotations(self):
         import ast
         source = (ROOT / "init.py").read_text()
