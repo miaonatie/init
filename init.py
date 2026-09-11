@@ -713,6 +713,9 @@ class Bootstrap:
                 self.apt_updated = True
                 break
             if attempt < NETWORK_ATTEMPTS:
+                if attempt == 1 and self.upgrade_ubuntu_apt_sources_to_https():
+                    self.warn("Ubuntu HTTP repositories were unreachable; retrying with official HTTPS sources")
+                    continue
                 delay = NETWORK_DELAYS[min(attempt - 1, len(NETWORK_DELAYS) - 1)]
                 self.warn(f"APT update incomplete; retrying in {delay}s ({attempt}/{NETWORK_ATTEMPTS})")
                 time.sleep(delay)
@@ -720,6 +723,54 @@ class Bootstrap:
             if "APT index update failed" not in self.failures:
                 self.failures.append("APT index update failed")
         return self.apt_updated
+
+    @staticmethod
+    def ubuntu_apt_source_paths() -> 'list[Path]':
+        directory = Path("/etc/apt/sources.list.d")
+        return [
+            Path("/etc/apt/sources.list"),
+            *sorted(directory.glob("*.list")),
+            *sorted(directory.glob("*.sources")),
+        ]
+
+    def upgrade_ubuntu_apt_sources_to_https(self) -> bool:
+        """Use HTTPS for official Ubuntu archives when port 80 is unreachable."""
+        if self.distro["id"] != "ubuntu":
+            return False
+        changed = False
+        replacements = {
+            "http://archive.ubuntu.com": "https://archive.ubuntu.com",
+            "http://security.ubuntu.com": "https://security.ubuntu.com",
+            "http://ports.ubuntu.com": "https://ports.ubuntu.com",
+        }
+        for path in self.ubuntu_apt_source_paths():
+            try:
+                original = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            updated = original
+            for old, new in replacements.items():
+                updated = updated.replace(old, new)
+            if updated == original:
+                continue
+            handle = tempfile.NamedTemporaryFile(
+                prefix="init-ubuntu-source-", suffix=path.suffix, mode="w",
+                encoding="utf-8", delete=False,
+            )
+            try:
+                handle.write(updated)
+                handle.close()
+                result = self.run(
+                    ["install", "-m", "0644", handle.name, str(path)],
+                    sudo=True, check=False,
+                )
+                changed = result.returncode == 0 or changed
+            finally:
+                try:
+                    Path(handle.name).unlink()
+                except OSError:
+                    pass
+        return changed
 
     def enable_i386(self) -> 'list[str]':
         if self.arch not in {"x86_64", "amd64"}:
@@ -1833,6 +1884,12 @@ class Bootstrap:
     def install_r2ghidra(self) -> None:
         if self.r2ghidra_available():
             self.ok("r2ghidra: already installed and loadable")
+            return
+        if self.ubuntu_before("22.04"):
+            self.skip_compat(
+                "r2ghidra",
+                "current r2ghidra requires C++20; Ubuntu's default compiler is too old",
+            )
             return
         if not self.command_exists("r2pm"):
             self.failures.append(
@@ -3802,7 +3859,9 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        if self.r2ghidra_available():
+        if "r2ghidra" in self.compat_skips:
+            pass
+        elif self.r2ghidra_available():
             self.ok("r2ghidra plugin")
         else:
             ok_all = False

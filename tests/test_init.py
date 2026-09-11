@@ -230,9 +230,37 @@ class InstallerTests(unittest.TestCase):
             stderr="",
         )
         self.bootstrap.run = mock.Mock(return_value=result)
+        self.bootstrap.upgrade_ubuntu_apt_sources_to_https = mock.Mock(return_value=False)
         self.assertFalse(self.bootstrap.apt_update())
         self.assertEqual(self.bootstrap.run.call_count, MODULE.NETWORK_ATTEMPTS)
         self.assertIn("APT index update failed", self.bootstrap.failures)
+
+    def test_apt_update_retries_with_https_sources(self):
+        failed = subprocess.CompletedProcess(
+            ["apt-get", "update"], 0,
+            stdout="W: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/bionic/InRelease\n",
+            stderr="",
+        )
+        passed = subprocess.CompletedProcess(["apt-get", "update"], 0, stdout="", stderr="")
+        self.bootstrap.run = mock.Mock(side_effect=[failed, passed])
+        self.bootstrap.upgrade_ubuntu_apt_sources_to_https = mock.Mock(return_value=True)
+        self.assertTrue(self.bootstrap.apt_update())
+        self.bootstrap.upgrade_ubuntu_apt_sources_to_https.assert_called_once_with()
+        self.assertNotIn("APT index update failed", self.bootstrap.failures)
+
+    def test_official_ubuntu_sources_can_be_upgraded_to_https(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "sources.list"
+            source.write_text("deb http://archive.ubuntu.com/ubuntu bionic main\n")
+
+            def install(command, **_kwargs):
+                self.assertIn("https://archive.ubuntu.com/ubuntu", Path(command[-2]).read_text())
+                return subprocess.CompletedProcess(command, 0)
+
+            self.bootstrap.ubuntu_apt_source_paths = mock.Mock(return_value=[source])
+            self.bootstrap.run = mock.Mock(side_effect=install)
+            self.assertTrue(self.bootstrap.upgrade_ubuntu_apt_sources_to_https())
 
     def test_apt_install_excludes_unavailable_packages_before_batch(self):
         self.bootstrap.package_installed = mock.Mock(return_value=False)
@@ -1227,6 +1255,14 @@ class InstallerTests(unittest.TestCase):
             "0",
         )
         self.assertEqual(self.bootstrap.failures, [])
+
+    def test_r2ghidra_is_skipped_with_old_ubuntu_compiler(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.r2ghidra_available = mock.Mock(return_value=False)
+        self.bootstrap.run = mock.Mock()
+        self.bootstrap.install_r2ghidra()
+        self.assertIn("r2ghidra", self.bootstrap.compat_skips)
+        self.bootstrap.run.assert_not_called()
 
     def test_r2ghidra_stops_when_r2pm_database_update_fails(self):
         self.bootstrap.r2ghidra_available = mock.Mock(return_value=False)
