@@ -54,7 +54,8 @@ REQUIRED_APT = [
     "python3", "python3-dev", "python3-pip", "python3-setuptools", "python3-wheel",
     "python3-ipython", "python-is-python3", "ruby-full", "bundler",
     "gdb", "gdbserver", "gdb-multiarch", "patchelf", "binutils", "binutils-multiarch",
-    "elfutils", "xxd", "ltrace", "strace", "checksec",
+    "elfutils", "xxd", "bsdextrautils", "libc-bin", "ltrace", "strace", "checksec",
+    "nasm", "yasm", "valgrind",
     "libseccomp-dev", "seccomp", "libc6-dbg",
     "qemu-user", "qemu-system", "qemu-user-binfmt",
     "net-tools", "bind9-dnsutils", "iputils-ping", "traceroute", "mtr-tiny", "iperf3",
@@ -69,7 +70,7 @@ DAILY_APT = [
 KALI_APT = ["gdu"]
 
 CTF_APT = [
-    "nasm", "yasm", "valgrind", "apktool",
+    "apktool",
     "steghide", "stegseek", "binwalk", "libimage-exiftool-perl", "pngcheck",
     "foremost", "sleuthkit", "testdisk", "squashfs-tools", "mtd-utils", "cabextract",
     "imagemagick", "ffmpeg", "sox", "libsox-fmt-all", "mediainfo",
@@ -99,11 +100,12 @@ PYTHON_IMPORT_PACKAGES = {
 }
 
 PYTHON_COMMAND_PACKAGES = {
+    "pwntools": ("pwn",),
     "ROPgadget": ("ROPgadget", "ropgadget"),
     "ropper": ("ropper",),
 }
 
-PYTHON_PACKAGES = [*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]
+PYTHON_PACKAGES = list(dict.fromkeys([*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]))
 PYTHON_IMPORTS = list(PYTHON_IMPORT_PACKAGES.values())
 
 RUBY_GEMS = ["one_gadget", "seccomp-tools", "zsteg"]
@@ -305,6 +307,22 @@ DOCKER_KEYRING = Path("/etc/apt/keyrings/docker.asc")
 DOCKER_SOURCE = Path("/etc/apt/sources.list.d/docker.sources")
 
 
+# Installed by file/binutils/libc-bin/bsdextrautils and the existing Pwn packages.
+# Keep the command checks explicit: an installed package alone is not sufficient.
+PWN_SYSTEM_PROBES = {
+    "file": ["--version"], "readelf": ["--version"], "objdump": ["--version"],
+    "objcopy": ["--version"], "nm": ["--version"], "strings": ["--version"],
+    "strip": ["--version"], "size": ["--version"], "addr2line": ["--version"],
+    "as": ["--version"], "ldd": ["--version"], "hexdump": ["-C", "/dev/null"],
+    "gdbserver": ["--version"], "strace": ["-V"], "ltrace": ["-V"],
+    "nc": ["-h"], "socat": ["-V"],
+}
+PWN_ENTRYPOINTS = ("checksec", "cyclic", "asm", "disasm", "shellcraft")
+COMMAND_PROBE_ARGUMENTS.update(PWN_SYSTEM_PROBES)
+COMMAND_PROBE_ARGUMENTS.update({name: ["--help"] for name in ("pwn", *PWN_ENTRYPOINTS)})
+COMMAND_PROBE_ARGUMENTS["pwntools"] = ["--help"]
+
+
 class Bootstrap:
     def __init__(self, *, update_existing: bool = False) -> None:
         self.failures: list[str] = []
@@ -476,7 +494,7 @@ class Bootstrap:
         if not self.apt_update():
             return packages  # Preserve the regular APT error handling.
         aliases = {"7zip": "p7zip-full", "bind9-dnsutils": "dnsutils",
-                   "libncurses-dev": "libncurses5-dev"}
+                   "libncurses-dev": "libncurses5-dev", "bsdextrautils": "bsdmainutils"}
         selected = []
         for package in packages:
             if self.package_installed(package) or self.package_available(package):
@@ -1584,6 +1602,7 @@ class Bootstrap:
         if not missing:
             self.ok("Python tools: already installed")
             return
+        missing = list(dict.fromkeys(missing))
         result = self.run(
             [
                 python, "-m", "pip", "install",
@@ -1612,15 +1631,19 @@ class Bootstrap:
         self.ok(f"Python CTF tools installed for {python} and launch-verified")
 
     def install_checksec_fallback(self) -> None:
-        if not self.ubuntu_before("24.04") or self.find_usable_command(["checksec"], ["--help"]):
+        """Supply missing pwntools CLI entry points on both Ubuntu and Kali."""
+        missing = [name for name in PWN_ENTRYPOINTS
+                   if not self.find_usable_command([name], ["--help"])]
+        if not missing:
             return
-        pwn = Path(self.system_python()).parent / "pwn"
-        if not pwn.is_file():
-            self.failures.append("checksec fallback requires the pwntools command")
+        pwn = self.find_usable_command(["pwn"], ["--help"])
+        if pwn is None:
+            self.failures.append("Pwn command fallbacks require a working pwntools pwn command")
             return
-        content = "#!/bin/sh\nexec " + shlex.quote(str(pwn)) + " checksec \"$@\"\n"
-        if not self.install_command_wrapper(Path("/usr/local/bin/checksec"), content):
-            self.failures.append("pwntools checksec command installation failed")
+        for name in missing:
+            content = f'#!/bin/sh\nexec {shlex.quote(pwn)} {name} "$@"\n'
+            if not self.install_command_wrapper(Path("/usr/local/bin") / name, content):
+                self.failures.append(f"pwntools {name} command installation failed")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -3611,6 +3634,9 @@ except gdb.error:
             ("libc-db-download", ["libc-db-download"]),
             ("libc-db-dump", ["libc-db-dump"]),
         ]
+        existing_labels = {label for label, _ in checks}
+        checks.extend((name, [name]) for name in (*PWN_SYSTEM_PROBES, "pwn", *PWN_ENTRYPOINTS)
+                      if name not in existing_labels)
         ok_all = True
         for label, names in checks:
             package = {"fd": "fd-find", "neowofetch": "hyfetch"}.get(label, label)
