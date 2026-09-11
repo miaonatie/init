@@ -130,20 +130,47 @@ class InstallerTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout, "\u00e9\ufffd")
 
-    def test_checksec_fallback_uses_the_isolated_pwntools_command(self):
-        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
-        self.bootstrap.find_usable_command = mock.Mock(return_value=None)
-        self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
-        with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE, "HOME", Path(directory)):
-            pwn = Path(self.bootstrap.system_python()).parent / "pwn"
-            pwn.parent.mkdir(parents=True)
-            pwn.touch()
+    def test_pwn_fallbacks_preserve_existing_commands_on_all_distros(self):
+        for distro in ({"id": "kali"}, {"id": "ubuntu", "version": "24.04"},
+                       {"id": "ubuntu", "version": "18.04"}):
+            self.bootstrap.distro = distro
+            self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/bin/tool")
+            self.bootstrap.install_command_wrapper = mock.Mock()
             self.bootstrap.install_checksec_fallback()
-            call = self.bootstrap.install_command_wrapper.call_args
-            self.assertEqual(call.args[0], Path("/usr/local/bin/checksec"))
-            self.assertIn(str(pwn), call.args[1])
-            self.assertIn('checksec "$@"', call.args[1])
-            self.assertEqual(subprocess.run(["sh", "-n"], input=call.args[1], text=True).returncode, 0)
+            self.bootstrap.install_command_wrapper.assert_not_called()
+
+    def test_missing_pwn_fallbacks_preserve_arguments(self):
+        with tempfile.TemporaryDirectory(prefix="pwn tools ") as directory:
+            root = Path(directory)
+            pwn = root / "pwn"
+            pwn.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            pwn.chmod(0o755)
+            self.bootstrap.find_usable_command = mock.Mock(
+                side_effect=lambda names, args: str(pwn) if names == ["pwn"] else None)
+            def install(destination, content):
+                path = root / destination.name
+                path.write_text(content)
+                path.chmod(0o755)
+                return True
+            self.bootstrap.install_command_wrapper = mock.Mock(side_effect=install)
+            self.bootstrap.install_checksec_fallback()
+            self.assertEqual(self.bootstrap.install_command_wrapper.call_count, len(MODULE.PWN_ENTRYPOINTS))
+            for name in MODULE.PWN_ENTRYPOINTS:
+                output = subprocess.check_output([str(root / name), "a b", "--help"], text=True)
+                self.assertEqual(output.splitlines(), [name, "a b", "--help"])
+
+    def test_missing_pwn_backend_is_a_failure(self):
+        self.bootstrap.find_usable_command = mock.Mock(return_value=None)
+        self.bootstrap.install_command_wrapper = mock.Mock()
+        self.bootstrap.install_checksec_fallback()
+        self.bootstrap.install_command_wrapper.assert_not_called()
+        self.assertTrue(self.bootstrap.failures)
+
+    def test_pwn_essentials_are_required_not_optional(self):
+        for package in ("file", "binutils", "bsdextrautils", "libc-bin", "nasm", "yasm", "valgrind"):
+            self.assertIn(package, MODULE.REQUIRED_APT)
+            self.assertNotIn(package, MODULE.CTF_APT)
+        self.assertEqual(MODULE.PYTHON_COMMAND_PACKAGES["pwntools"], ("pwn",))
 
     def test_python36_grammar_and_annotations(self):
         import ast
