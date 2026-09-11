@@ -37,7 +37,7 @@ jobs:
               sed -i "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g" /etc/apt/sources.list
             fi
             apt-get -o Acquire::Retries=3 -o Acquire::https::CaInfo=/tmp/host-ca.crt update -qq
-            apt-get install -y --no-install-recommends python3 ca-certificates curl
+            apt-get -o Acquire::https::CaInfo=/tmp/host-ca.crt install -y --no-install-recommends python3 ca-certificates curl
             python3 init.py --help
             python3 tests/smoke_pwn.py
           '
