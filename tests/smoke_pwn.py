@@ -10,6 +10,20 @@ import init
 
 b = init.Bootstrap()
 if sys.argv[1:] != ["--exercise"]:
+    original_path, original_wsl = os.environ["PATH"], b.is_wsl
+    windows_dir = Path("/mnt/c/Users/init-ci/Python/Scripts")
+    windows_dir.mkdir(parents=True, exist_ok=True)
+    launcher = windows_dir / "init-broken-ROPgadget"
+    launcher.write_text("#!/nonexistent/windows/python.exe\n")
+    launcher.chmod(0o755)
+    os.environ["PATH"] = str(windows_dir) + os.pathsep + original_path
+    b.is_wsl = True
+    assert b.find_command([launcher.name]) is None
+    assert str(windows_dir) not in os.environ["PATH"].split(os.pathsep)
+    assert b.run([str(launcher)], capture=True, check=False).returncode == 127
+    os.environ["PATH"], b.is_wsl = original_path, original_wsl
+
+if sys.argv[1:] != ["--exercise"]:
     assert b.supported_distro(b.distro), b.distro
     b.apt_updated = True
     aliases = ["7zip", "bind9-dnsutils", "libncurses-dev", "python-is-python3", "checksec", "bsdextrautils"]
