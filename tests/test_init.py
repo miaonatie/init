@@ -383,6 +383,21 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("ROPgadget", command)
         self.assertNotIn("ropper", command)
 
+    def test_python_batch_failure_does_not_block_other_packages(self):
+        self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
+        self.bootstrap.run = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="lief\npwn\n"),
+            subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 1),
+        ])
+        self.bootstrap.install_python_tools()
+        commands = [call.args[0] for call in self.bootstrap.run.call_args_list[1:]]
+        self.assertEqual(commands[1][-1], "pwntools")
+        self.assertEqual(commands[2][-1], "lief")
+        self.assertTrue(all("--only-binary=lief" in command for command in commands))
+        self.assertEqual(self.bootstrap.failures, ["Python package installation failed: lief"])
+
     def test_python2_existing_runtime_is_not_reinstalled(self):
         python2 = Path("/usr/bin/python2")
         self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
@@ -1206,7 +1221,11 @@ class InstallerTests(unittest.TestCase):
         commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
         self.assertEqual(commands, [["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]])
         self.assertTrue(self.bootstrap.run.call_args_list[0].kwargs["network"])
-        self.assertNotIn("network", self.bootstrap.run.call_args_list[1].kwargs)
+        self.assertTrue(self.bootstrap.run.call_args_list[1].kwargs["network"])
+        self.assertEqual(
+            self.bootstrap.run.call_args_list[1].kwargs["env"]["GIT_TERMINAL_PROMPT"],
+            "0",
+        )
         self.assertEqual(self.bootstrap.failures, [])
 
     def test_r2ghidra_stops_when_r2pm_database_update_fails(self):

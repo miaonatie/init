@@ -36,12 +36,15 @@ if sys.argv[1:] != ["--exercise"]:
             "gdb-multiarch", "patchelf", "strace", "ltrace", "nasm", "yasm", "valgrind", "xxd",
             "netcat-openbsd", "socat", "checksec"]
     assert set(core) <= set(init.REQUIRED_APT)
-    assert b.apt_install(b.compatible_packages(core), "Pwn smoke dependencies", required=True)
+    assert b.apt_install(b.compatible_packages(core) + ["libmagic1"], "Pwn smoke dependencies", required=True)
     assert b.install_uv()
     python = "/tmp/init-pwn-smoke/bin/python"
-    b.run([b.uv_executable(), "venv", "--python", "3.12", python.rsplit("/bin/", 1)[0]], timeout=600)
-    b.run([b.uv_executable(), "pip", "install", "--python", python, "pwntools"], timeout=600)
+    b.run([b.uv_executable(), "venv", "--seed", "--python", "3.12", python.rsplit("/bin/", 1)[0]], timeout=600)
     os.environ["PATH"] = str(Path(python).parent) + os.pathsep + os.environ["PATH"]
+    b.system_python = lambda: python
+    b.install_python_tools()
+    assert not b.failures, b.failures
+    b.run([python, "-c", "import importlib; [importlib.import_module(m) for m in " + repr(init.PYTHON_IMPORTS) + "]"])
     os.execv(python, [python, __file__, "--exercise"])
 
 b.install_checksec_fallback()
