@@ -18,3 +18,34 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Help smoke test
         run: python3 init.py --help
+
+  ubuntu-compatibility:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["18.04", "20.04", "22.04", "24.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Distro Python startup and core package resolution
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src ubuntu:${{ matrix.ubuntu }} bash -ec '
+            apt-get update -qq
+            apt-get install -y --no-install-recommends python3 ca-certificates
+            python3 init.py --help
+            python3 - <<"PY"
+          import init
+          b = init.Bootstrap()
+          assert b.supported_distro(b.distro), b.distro
+          assert b.run(["true"], capture=True).returncode == 0
+          b.apt_updated = True
+          # Query aliases individually, then check the core set in one APT call.
+          aliases = ["7zip", "bind9-dnsutils", "libncurses-dev", "python-is-python3", "checksec"]
+          packages = b.compatible_packages(aliases)
+          packages += [p for p in init.REQUIRED_APT if p not in aliases]
+          result = b.run(["apt-cache", "--no-all-versions", "show"] + packages, capture=True, check=False)
+          available = {line.split(": ", 1)[1] for line in result.stdout.splitlines() if line.startswith("Package: ")}
+          missing = [p for p in packages if p not in available]
+          assert not missing, missing
+          PY
+          '

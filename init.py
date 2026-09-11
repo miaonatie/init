@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Idempotent CTF workstation bootstrap for Ubuntu and Kali."""
 
-from __future__ import annotations
-
 import os
 import platform
 import pwd
@@ -311,6 +309,7 @@ class Bootstrap:
     def __init__(self, *, update_existing: bool = False) -> None:
         self.failures: list[str] = []
         self.skipped: list[str] = []
+        self.compat_skips = set()
         self.started_monotonic = time.monotonic()
         self.step = 0
         self.step_total = 4
@@ -369,7 +368,7 @@ class Bootstrap:
         timing = self.colorize("2", f"elapsed {elapsed}")
         print(f"\n{stage} | {timing}")
 
-    def run_stage(self, title: str, action: Callable[[], object]) -> None:
+    def run_stage(self, title: str, action: 'Callable[[], object]') -> None:
         self.section(title)
         started = time.monotonic()
         failures_before = len(self.failures)
@@ -385,7 +384,7 @@ class Bootstrap:
     def command_exists(command: str) -> bool:
         return shutil.which(command) is not None
 
-    def executable_usable(self, executable: str, arguments: list[str]) -> bool:
+    def executable_usable(self, executable: str, arguments: 'list[str]') -> bool:
         result = self.run(
             [executable, *arguments],
             check=False,
@@ -408,7 +407,7 @@ class Bootstrap:
         )
 
     @staticmethod
-    def detect_distro() -> dict[str, str]:
+    def detect_distro() -> 'dict[str, str]':
         result: dict[str, str] = {
             "id": "unknown",
             "name": "Unknown Linux",
@@ -445,7 +444,7 @@ class Bootstrap:
         return "microsoft" in value or "wsl" in value or bool(os.environ.get("WSL_DISTRO_NAME"))
 
     @staticmethod
-    def supported_distro(distro: dict[str, str]) -> bool:
+    def supported_distro(distro: 'dict[str, str]') -> bool:
         if distro["id"] == "kali":
             return True
         if distro["id"] != "ubuntu":
@@ -454,7 +453,43 @@ class Bootstrap:
             major, minor = (int(part) for part in distro["version"].split(".")[:2])
         except (TypeError, ValueError):
             return False
-        return (major, minor) >= (24, 4)
+        return (major, minor) >= (18, 4)
+
+    def ubuntu_before(self, version: str) -> bool:
+        if self.distro["id"] != "ubuntu":
+            return False
+        try:
+            return tuple(map(int, self.distro["version"].split("."))) < tuple(map(int, version.split(".")))
+        except (KeyError, ValueError):
+            return False
+
+    def skip_compat(self, name: str, reason: str) -> None:
+        self.compat_skips.add(name)
+        message = f"{name}: {reason}"
+        if message not in self.skipped:
+            self.skipped.append(message)
+            self.warn(message)
+
+    def compatible_packages(self, packages: 'list[str]', *, optional: bool = False) -> 'list[str]':
+        if not self.ubuntu_before("24.04"):
+            return packages
+        if not self.apt_update():
+            return packages  # Preserve the regular APT error handling.
+        aliases = {"7zip": "p7zip-full", "bind9-dnsutils": "dnsutils",
+                   "libncurses-dev": "libncurses5-dev"}
+        selected = []
+        for package in packages:
+            if self.package_installed(package) or self.package_available(package):
+                selected.append(package)
+            elif package in aliases:
+                selected.append(aliases[package])
+            elif package in {"python-is-python3", "checksec"}:
+                pass  # Command fallbacks provide python and pwntools checksec.
+            elif optional:
+                self.skip_compat(package, "unavailable in this Ubuntu release's APT repositories")
+            else:
+                selected.append(package)  # Missing core dependencies remain failures.
+        return selected
 
     def _extend_path(self) -> None:
         candidates = [
@@ -472,16 +507,16 @@ class Bootstrap:
 
     def run(
         self,
-        command: list[str],
+        command: 'list[str]',
         *,
         sudo: bool = False,
         check: bool = True,
         capture: bool = False,
-        cwd: Path | None = None,
-        env: dict[str, str] | None = None,
+        cwd: 'Path | None' = None,
+        env: 'dict[str, str] | None' = None,
         network: bool = False,
-        timeout: int | None = None,
-    ) -> subprocess.CompletedProcess[str]:
+        timeout: 'int | None' = None,
+    ) -> 'subprocess.CompletedProcess[str]':
         final = list(command)
         if sudo and os.geteuid() != 0:
             final = ["sudo", *final]
@@ -492,13 +527,15 @@ class Bootstrap:
         result: subprocess.CompletedProcess[str] | None = None
         for attempt in range(1, attempts + 1):
             if not capture:
-                print("  $", shlex.join(final))
+                print("  $", " ".join(shlex.quote(arg) for arg in final))
             try:
                 result = subprocess.run(
                     final,
                     cwd=str(cwd) if cwd else None,
                     env=merged_env,
-                    text=True,
+                    universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
                     stdout=subprocess.PIPE if capture else None,
                     stderr=subprocess.PIPE if capture else None,
                     timeout=timeout,
@@ -526,7 +563,7 @@ class Bootstrap:
         return result
 
     @staticmethod
-    def output_text(value: str | bytes | None) -> str:
+    def output_text(value: 'str | bytes | None') -> str:
         if value is None:
             return ""
         if isinstance(value, bytes):
@@ -534,11 +571,11 @@ class Bootstrap:
         return value
 
     @staticmethod
-    def apt_env() -> dict[str, str]:
+    def apt_env() -> 'dict[str, str]':
         return {"DEBIAN_FRONTEND": "noninteractive", "NEEDRESTART_MODE": "a"}
 
     @staticmethod
-    def apt_options() -> list[str]:
+    def apt_options() -> 'list[str]':
         return [
             "-o", "Acquire::Retries=1",
             "-o", "Dpkg::Options::=--force-confold",
@@ -566,7 +603,7 @@ class Bootstrap:
         if not self.supported_distro(self.distro):
             raise RuntimeError(
                 f"unsupported distribution: {self.distro['name']} "
-                f"(supported: Ubuntu 24.04+ and current Kali)"
+                f"(supported: Ubuntu 18.04+ and current Kali)"
             )
         self.require_sudo()
         free = shutil.disk_usage(HOME).free
@@ -604,12 +641,12 @@ class Bootstrap:
         )
         return result.returncode == 0 and bool((result.stdout or "").strip())
 
-    def planned_apt_packages(self) -> list[str]:
+    def planned_apt_packages(self) -> 'list[str]':
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         i386 = I386_APT if self.arch in {"x86_64", "amd64"} else []
         return list(dict.fromkeys([*REQUIRED_APT, *DAILY_APT, *CTF_APT, *distro_packages, *i386]))
 
-    def installation_space_limits(self) -> tuple[int, int]:
+    def installation_space_limits(self) -> 'tuple[int, int]':
         missing = sum(not self.package_installed(package) for package in self.planned_apt_packages())
         if missing >= 10:
             return 12, 18
@@ -652,7 +689,7 @@ class Bootstrap:
                 self.failures.append("APT index update failed")
         return self.apt_updated
 
-    def enable_i386(self) -> list[str]:
+    def enable_i386(self) -> 'list[str]':
         if self.arch not in {"x86_64", "amd64"}:
             self.skipped.append(f"i386 multilib skipped on {self.arch}")
             return []
@@ -666,7 +703,7 @@ class Bootstrap:
             self.apt_updated = False
         return I386_APT
 
-    def apt_install(self, packages: Iterable[str], label: str, *, required: bool) -> bool:
+    def apt_install(self, packages: 'Iterable[str]', label: str, *, required: bool) -> bool:
         unique = list(dict.fromkeys(packages))
         missing = [package for package in unique if not self.package_installed(package)]
         if not missing:
@@ -767,11 +804,11 @@ class Bootstrap:
                 self.apt_updated = False
         i386 = self.enable_i386()
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
-        self.apt_install(REQUIRED_APT, "system and development packages", required=True)
+        self.apt_install(self.compatible_packages(REQUIRED_APT), "system and development packages", required=True)
         self.apt_install(
-            [*DAILY_APT, *distro_packages], "daily CLI tools", required=True
+            self.compatible_packages([*DAILY_APT, *distro_packages], optional=True), "daily CLI tools", required=True
         )
-        self.apt_install(CTF_APT, "CTF CLI tools", required=True)
+        self.apt_install(self.compatible_packages(CTF_APT, optional=True), "CTF CLI tools", required=True)
         if i386:
             self.apt_install(i386, "32-bit development support", required=True)
         self.install_command_links()
@@ -804,7 +841,7 @@ class Bootstrap:
     def install_command_links(self) -> None:
         for source, target in (
             ("batcat", "bat"), ("fdfind", "fd"), ("7zz", "7z"),
-            ("ipython3", "ipython"),
+            ("ipython3", "ipython"), ("python3", "python"),
         ):
             if shutil.which(target):
                 continue
@@ -824,6 +861,9 @@ class Bootstrap:
         return bool(executable) and self.executable_usable(executable, ["--version"])
 
     def install_fastfetch(self) -> None:
+        if self.ubuntu_before("24.04") and not self.fastfetch_ready() and not self.package_available("fastfetch"):
+            self.skip_compat("fastfetch", "no distro package; skipping the latest binary on older Ubuntu")
+            return
         if self.fastfetch_ready():
             self.ok("Fastfetch backend for HyFetch: already installed")
             return
@@ -1044,7 +1084,7 @@ class Bootstrap:
         return True
 
     @staticmethod
-    def zsh_plugin_tokens(body: str) -> list[str]:
+    def zsh_plugin_tokens(body: str) -> 'list[str]':
         tokens: list[str] = []
         for line in body.splitlines():
             line = line.split("#", 1)[0]
@@ -1217,7 +1257,7 @@ class Bootstrap:
             and Path(account.pw_shell).name == "zsh"
         )
 
-    def docker_repository(self) -> tuple[str, str]:
+    def docker_repository(self) -> 'tuple[str, str]':
         if self.distro["id"] == "kali":
             return "debian", "trixie"
         suite = self.distro.get("ubuntu_codename") or self.distro.get("codename")
@@ -1371,21 +1411,21 @@ class Bootstrap:
     def python2_prefix(self) -> Path:
         return TOOLS_DIR / "pyenv" / "versions" / PYTHON2_VERSION
 
-    def valid_python2(self, executable: Path | str) -> bool:
+    def valid_python2(self, executable: 'Path | str') -> bool:
         result = self.run(
             [str(executable), "--version"], check=False, capture=True, timeout=30
         )
         output = (result.stdout or "") + (result.stderr or "")
         return result.returncode == 0 and output.strip().startswith("Python 2.7.")
 
-    def existing_python2(self) -> Path | None:
+    def existing_python2(self) -> 'Path | None':
         candidates = [shutil.which("python2"), str(self.python2_prefix() / "bin" / "python2.7")]
         for candidate in candidates:
             if candidate and Path(candidate).exists() and self.valid_python2(candidate):
                 return Path(candidate)
         return None
 
-    def python2_pip_ready(self, executable: Path | str) -> bool:
+    def python2_pip_ready(self, executable: 'Path | str') -> bool:
         result = self.run(
             [str(executable), "-m", "pip", "--version"],
             check=False,
@@ -1445,7 +1485,7 @@ class Bootstrap:
         if existing is not None:
             resolved = existing.resolve()
             system_runtime_without_pip = (
-                resolved.is_relative_to(Path("/usr"))
+                Path("/usr") in resolved.parents
                 and not self.python2_pip_ready(resolved)
             )
             if system_runtime_without_pip:
@@ -1485,8 +1525,30 @@ class Bootstrap:
             "Python 2.7.18 legacy runtime and pip2 installed without changing system Python"
         )
 
+    def prepare_python_tools(self) -> bool:
+        if not self.ubuntu_before("24.04"):
+            return True
+        if not self.install_uv():
+            return False
+        python = Path(self.system_python())
+        if not python.is_file():
+            result = self.run(
+                [self.uv_executable(), "venv", "--python", "3.12", "--seed", str(python.parent.parent)],
+                check=False, timeout=600,
+            )
+            if result.returncode != 0:
+                self.failures.append("isolated Python 3.12 environment installation failed")
+                return False
+        # Only the interactive shell PATH changes; /usr/bin/python3 stays intact.
+        body = f'export PATH={shlex.quote(str(python.parent))}:"$PATH"'
+        for profile in (BASHRC, ZSHRC):
+            self.update_managed_block(profile, "# >>> init Python tools >>>", "# <<< init Python tools <<<", body)
+        os.environ["PATH"] = str(python.parent) + os.pathsep + os.environ.get("PATH", "")
+        self.ok(f"Python CTF tools use {python}; system Python is preserved")
+        return True
+
     def install_python_tools(self) -> None:
-        python = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
+        python = self.system_python()
         probe_code = (
             "import importlib\n"
             f"modules = {PYTHON_IMPORTS!r}\n"
@@ -1517,18 +1579,20 @@ class Bootstrap:
                 list(commands), COMMAND_PROBE_ARGUMENTS[package]
             ) is None
         )
+        if self.ubuntu_before("24.04") and not (Path(python).parent / "ipython").is_file():
+            missing.append("ipython")
         if not missing:
             self.ok("Python tools: already installed")
             return
         result = self.run(
             [
-                python, "-m", "pip", "install", "--break-system-packages",
+                python, "-m", "pip", "install",
                 "--disable-pip-version-check", *PIP_NETWORK_OPTIONS,
                 "--upgrade", *missing,
             ],
-            sudo=True,
+            sudo=not self.ubuntu_before("24.04"),
             check=False,
-            env={"PIP_ROOT_USER_ACTION": "ignore"},
+            env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
         )
         if result.returncode != 0:
             self.failures.append("Python CTF package installation failed")
@@ -1545,7 +1609,18 @@ class Bootstrap:
                 "Python CTF command verification failed: " + ", ".join(broken)
             )
             return
-        self.ok("Python CTF tools installed system-wide and launch-verified")
+        self.ok(f"Python CTF tools installed for {python} and launch-verified")
+
+    def install_checksec_fallback(self) -> None:
+        if not self.ubuntu_before("24.04") or self.find_usable_command(["checksec"], ["--help"]):
+            return
+        pwn = Path(self.system_python()).parent / "pwn"
+        if not pwn.is_file():
+            self.failures.append("checksec fallback requires the pwntools command")
+            return
+        content = "#!/bin/sh\nexec " + shlex.quote(str(pwn)) + " checksec \"$@\"\n"
+        if not self.install_command_wrapper(Path("/usr/local/bin/checksec"), content):
+            self.failures.append("pwntools checksec command installation failed")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -1558,6 +1633,10 @@ class Bootstrap:
         if not missing:
             self.ok("Ruby CTF tools: already installed")
             return
+        if self.ubuntu_before("22.04"):
+            versions = {"one_gadget": "1.7.3", "seccomp-tools": "1.5.0", "zsteg": "0.2.13"}
+            missing = [f"{gem}:{versions[gem]}" for gem in missing]
+            self.info("using Ruby CTF tool versions compatible with older Ubuntu")
         result = self.run(
             ["gem", "install", "--no-document", *missing],
             sudo=True,
@@ -1579,10 +1658,10 @@ class Bootstrap:
         self.ok("Ruby CTF tools installed and launch-verified")
 
     @staticmethod
-    def format_version(version: tuple[int, int, int]) -> str:
+    def format_version(version: 'tuple[int, int, int]') -> str:
         return ".".join(str(part) for part in version)
 
-    def radare2_version(self) -> tuple[int, int, int] | None:
+    def radare2_version(self) -> 'tuple[int, int, int] | None':
         self._extend_path()
         if not self.command_exists("r2"):
             return None
@@ -1750,11 +1829,12 @@ class Bootstrap:
                 "check that radare2 and libradare2-dev have matching versions"
             )
 
-    @staticmethod
-    def system_python() -> str:
+    def system_python(self) -> str:
+        if self.ubuntu_before("24.04"):
+            return str(HOME / ".local/share/init/python/bin/python3")
         return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 
-    def uv_executable(self) -> str | None:
+    def uv_executable(self) -> 'str | None':
         self._extend_path()
         found = shutil.which("uv")
         if found:
@@ -1810,7 +1890,7 @@ class Bootstrap:
         self.ok(f"uv installed ({self.uv_executable()})")
         return True
 
-    def uv_tool_dir(self) -> Path | None:
+    def uv_tool_dir(self) -> 'Path | None':
         if self._uv_tool_dir_cache is not None:
             return self._uv_tool_dir_cache
         executable = self.uv_executable()
@@ -1830,13 +1910,13 @@ class Bootstrap:
         self._uv_tool_dir_cache = Path(lines[-1]).expanduser()
         return self._uv_tool_dir_cache
 
-    def pwndbg_gdbinit_path(self) -> Path | None:
+    def pwndbg_gdbinit_path(self) -> 'Path | None':
         tool_dir = self.uv_tool_dir()
         if tool_dir is None:
             return None
         return tool_dir / PWNDBG_TOOL_NAME / "share" / "pwndbg" / "gdbinit.py"
 
-    def gdb_python_abi(self) -> tuple[str, str] | None:
+    def gdb_python_abi(self) -> 'tuple[str, str] | None':
         if self._gdb_python_abi_cache is not None:
             return self._gdb_python_abi_cache
         result = self.run(
@@ -1861,7 +1941,7 @@ class Bootstrap:
                 return self._gdb_python_abi_cache
         return None
 
-    def gdb_python_install_target(self) -> str | None:
+    def gdb_python_install_target(self) -> 'str | None':
         if self._gdb_python_target_cache is not None:
             return self._gdb_python_target_cache
         abi = self.gdb_python_abi()
@@ -1897,18 +1977,18 @@ class Bootstrap:
         self._gdb_python_target_cache = version
         return self._gdb_python_target_cache
 
-    def pwndbg_tool_python(self) -> Path | None:
+    def pwndbg_tool_python(self) -> 'Path | None':
         tool_dir = self.uv_tool_dir()
         if tool_dir is None:
             return None
         executable = tool_dir / PWNDBG_TOOL_NAME / "bin" / "python"
         return executable if executable.is_file() and os.access(executable, os.X_OK) else None
 
-    def pwndbg_tool_root(self) -> Path | None:
+    def pwndbg_tool_root(self) -> 'Path | None':
         tool_dir = self.uv_tool_dir()
         return tool_dir / PWNDBG_TOOL_NAME if tool_dir is not None else None
 
-    def pwndbg_site_packages_path(self) -> Path | None:
+    def pwndbg_site_packages_path(self) -> 'Path | None':
         if self._pwndbg_site_packages_cache is not None:
             return self._pwndbg_site_packages_cache
         python = self.pwndbg_tool_python()
@@ -1931,7 +2011,7 @@ class Bootstrap:
             return None
         candidate = Path(lines[-1]).expanduser().resolve()
         root = root.resolve()
-        if not candidate.is_dir() or not candidate.is_relative_to(root):
+        if not candidate.is_dir() or root not in candidate.parents:
             return None
         self._pwndbg_site_packages_cache = candidate
         return self._pwndbg_site_packages_cache
@@ -2146,7 +2226,9 @@ class Bootstrap:
     @staticmethod
     def path_resolves_within(path: Path, directory: Path) -> bool:
         try:
-            return path.resolve(strict=False).is_relative_to(directory.resolve(strict=False))
+            resolved = path.resolve(strict=False)
+            root = directory.resolve(strict=False)
+            return resolved == root or root in resolved.parents
         except OSError:
             return False
 
@@ -2168,13 +2250,16 @@ class Bootstrap:
         for command in PWNDBG_PORTABLE_COMMANDS:
             portable_root = (
                 PWNDBG_PORTABLE_USER_DIR
-                if command.is_relative_to(HOME)
+                if (command == HOME or HOME in command.parents)
                 else PWNDBG_PORTABLE_SYSTEM_DIR
             )
             if not command.is_symlink() or not self.path_resolves_within(command, portable_root):
                 continue
-            if command.is_relative_to(HOME) or os.geteuid() == 0:
-                command.unlink(missing_ok=True)
+            if (command == HOME or HOME in command.parents) or os.geteuid() == 0:
+                try:
+                    command.unlink()
+                except FileNotFoundError:
+                    pass
             else:
                 self.run(["rm", "-f", str(command)], sudo=True, check=False)
             changed = True
@@ -2242,7 +2327,7 @@ class Bootstrap:
                     pass
 
     @staticmethod
-    def repository_command_wrapper(repository: Path, command: list[str]) -> str:
+    def repository_command_wrapper(repository: Path, command: 'list[str]') -> str:
         return (
             "#!/usr/bin/env bash\n"
             "set -e\n"
@@ -2255,7 +2340,7 @@ class Bootstrap:
             "  args+=(\"$arg\")\n"
             "done\n"
             f"cd {shlex.quote(str(repository))}\n"
-            f"exec {shlex.join(command)} \"${{args[@]}}\"\n"
+            f"exec {' '.join(shlex.quote(arg) for arg in command)} \"${{args[@]}}\"\n"
         )
 
     @staticmethod
@@ -2422,7 +2507,7 @@ def _init_decompile_with_external_r2(address):
     try:
         result = subprocess.run(
             command,
-            text=True,
+            universal_newlines=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=180,
@@ -2579,7 +2664,7 @@ except gdb.error:
             )
         )
 
-    def pwndbg_r2ghidra_probe(self) -> subprocess.CompletedProcess[str]:
+    def pwndbg_r2ghidra_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._pwndbg_probe_cache is not None:
             return self._pwndbg_probe_cache
         import_probe = self.pwndbg_gdb_import_probe()
@@ -2640,7 +2725,7 @@ except gdb.error:
         )
 
     @staticmethod
-    def pwndbg_imports_available(result: subprocess.CompletedProcess[str]) -> bool:
+    def pwndbg_imports_available(result: 'subprocess.CompletedProcess[str]') -> bool:
         output = ((result.stdout or "") + (result.stderr or "")).lower()
         return (
             result.returncode == 0
@@ -2651,7 +2736,7 @@ except gdb.error:
             and "traceback" not in output
         )
 
-    def pwndbg_gdb_import_probe(self) -> subprocess.CompletedProcess[str]:
+    def pwndbg_gdb_import_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._pwndbg_import_probe_cache is not None:
             return self._pwndbg_import_probe_cache
         if (
@@ -2696,7 +2781,7 @@ except gdb.error:
         )
         return self._pwndbg_import_probe_cache
 
-    def pwndbg_launcher_probe(self) -> subprocess.CompletedProcess[str]:
+    def pwndbg_launcher_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._pwndbg_launcher_probe_cache is not None:
             return self._pwndbg_launcher_probe_cache
         tool_root = self.pwndbg_tool_root()
@@ -2729,7 +2814,7 @@ except gdb.error:
         )
 
     @staticmethod
-    def probe_error_details(result: subprocess.CompletedProcess[str]) -> str:
+    def probe_error_details(result: 'subprocess.CompletedProcess[str]') -> str:
         details = [
             line.strip()
             for line in ((result.stderr or "") + "\n" + (result.stdout or "")).splitlines()
@@ -2746,6 +2831,11 @@ except gdb.error:
         return " | ".join((useful or details)[-3:])[:400]
 
     def install_pwndbg_environment(self) -> None:
+        abi = self.gdb_python_abi() if self.ubuntu_before("22.04") else None
+        if self.ubuntu_before("22.04") and (abi is None or tuple(map(int, abi[0].split("."))) < (3, 10)):
+            self.install_uv()
+            self.skip_compat("pwndbg", "current Pwndbg needs a newer system GDB/Python; keeping plain GDB and existing debugger configuration")
+            return
         self.remove_legacy_pwndbg_portable()
         if not self.install_pwndbg_uv():
             return
@@ -2800,7 +2890,7 @@ except gdb.error:
                 "Pwndbg r2ghidra bridge verification failed" + suffix
             )
 
-    def nvm_version(self) -> str | None:
+    def nvm_version(self) -> 'str | None':
         if not (NVM_DIR / "nvm.sh").exists():
             return None
         result = self.run(
@@ -2875,7 +2965,7 @@ except gdb.error:
         capture: bool = False,
         network: bool = False,
         timeout: int = 300,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> 'subprocess.CompletedProcess[str]':
         script = (
             "set -e\n"
             f"export NVM_DIR={shlex.quote(str(NVM_DIR))}\n"
@@ -2898,7 +2988,7 @@ except gdb.error:
             },
         )
 
-    def node_runtime_probe(self) -> subprocess.CompletedProcess[str]:
+    def node_runtime_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._node_runtime_probe_cache is not None:
             return self._node_runtime_probe_cache
         if not (NVM_DIR / "nvm.sh").exists():
@@ -2924,7 +3014,7 @@ except gdb.error:
             and all(label in output for label in ("nvm ", "node v", "npm "))
         )
 
-    def node_environment_probe(self) -> subprocess.CompletedProcess[str]:
+    def node_environment_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._node_probe_cache is not None:
             return self._node_probe_cache
         if not (NVM_DIR / "nvm.sh").exists():
@@ -2954,6 +3044,9 @@ except gdb.error:
         )
 
     def install_node_environment(self) -> None:
+        if self.ubuntu_before("20.04"):
+            self.skip_compat("node", "current Node LTS requires glibc >= 2.28; keeping the system glibc")
+            return
         if not self.install_nvm() or not self.configure_node_shells():
             return
         if not self.update_existing and self.node_environment_available():
@@ -2985,7 +3078,7 @@ except gdb.error:
             return
         self.ok("Node.js LTS, npm, Corepack, pnpm and Yarn installed with nvm")
 
-    def go_version(self) -> str | None:
+    def go_version(self) -> 'str | None':
         go = self.find_command(["go"])
         if go is None:
             return None
@@ -3035,7 +3128,7 @@ except gdb.error:
         self.ok(f"Go toolchain: {version}; tool commands: {bin_dir}")
 
     @staticmethod
-    def rust_env() -> dict[str, str]:
+    def rust_env() -> 'dict[str, str]':
         return {
             "CARGO_HOME": str(CARGO_HOME),
             "RUSTUP_HOME": str(RUSTUP_HOME),
@@ -3057,7 +3150,7 @@ except gdb.error:
             return False
         return True
 
-    def rust_environment_probe(self) -> subprocess.CompletedProcess[str]:
+    def rust_environment_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._rust_probe_cache is not None:
             return self._rust_probe_cache
         commands = (
@@ -3085,7 +3178,7 @@ except gdb.error:
         )
         return self._rust_probe_cache
 
-    def rust_runtime_probe(self) -> subprocess.CompletedProcess[str]:
+    def rust_runtime_probe(self) -> 'subprocess.CompletedProcess[str]':
         if self._rust_runtime_probe_cache is not None:
             return self._rust_runtime_probe_cache
         commands = (
@@ -3260,17 +3353,17 @@ except gdb.error:
         if self.update_existing or not runtime_ready:
             python = self.system_python()
             pip_base = [
-                python, "-m", "pip", "install", "--break-system-packages",
+                python, "-m", "pip", "install",
                 "--disable-pip-version-check", *PIP_NETWORK_OPTIONS, "--upgrade",
             ]
             self.info("glibc-all-in-one: ensuring the v2 Python dependencies")
             dependencies = self.run(
                 [*pip_base, *GLIBC_AIO_DEPENDENCIES],
                 cwd=GLIBC_AIO_DIR,
-                sudo=True,
+                sudo=not self.ubuntu_before("24.04"),
                 check=False,
                 timeout=300,
-                env={"PIP_ROOT_USER_ACTION": "ignore"},
+                env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
             )
             if dependencies.returncode != 0:
                 self.failures.append("glibc-all-in-one v2 dependency installation failed")
@@ -3280,10 +3373,10 @@ except gdb.error:
             editable = self.run(
                 [*pip_base, "--editable", "."],
                 cwd=GLIBC_AIO_DIR,
-                sudo=True,
+                sudo=not self.ubuntu_before("24.04"),
                 check=False,
                 timeout=300,
-                env={"PIP_ROOT_USER_ACTION": "ignore"},
+                env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
             )
             if editable.returncode != 0:
                 self.failures.append("glibc-all-in-one v2 editable installation failed")
@@ -3433,7 +3526,9 @@ except gdb.error:
 
     def install_ctf_toolchain(self) -> None:
         self.install_python2_legacy()
-        self.install_python_tools()
+        if self.prepare_python_tools():
+            self.install_python_tools()
+            self.install_checksec_fallback()
         self.install_ruby_tools()
         self.install_node_environment()
         self.install_go_environment()
@@ -3443,7 +3538,7 @@ except gdb.error:
         self.install_pwndbg_environment()
         self.install_helper_repositories()
 
-    def find_command(self, names: list[str]) -> str | None:
+    def find_command(self, names: 'list[str]') -> 'str | None':
         self._extend_path()
         for name in names:
             found = shutil.which(name)
@@ -3451,7 +3546,7 @@ except gdb.error:
                 return found
         return None
 
-    def find_usable_command(self, names: list[str], arguments: list[str]) -> str | None:
+    def find_usable_command(self, names: 'list[str]', arguments: 'list[str]') -> 'str | None':
         found = self.find_command(names)
         if found and self.executable_usable(found, arguments):
             return found
@@ -3518,6 +3613,9 @@ except gdb.error:
         ]
         ok_all = True
         for label, names in checks:
+            package = {"fd": "fd-find", "neowofetch": "hyfetch"}.get(label, label)
+            if package in self.compat_skips:
+                continue
             found = self.find_command(names)
             probe_arguments = COMMAND_PROBE_ARGUMENTS.get(label)
             usable = bool(found) and (
@@ -3662,43 +3760,27 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        pwndbg_packages_ok = self.r2pipe_target_available()
-        if pwndbg_packages_ok:
-            self.ok(
-                f"Pwndbg r2pipe {R2PIPE_VERSION}: included in the uv tool environment"
-            )
-        else:
-            ok_all = False
-            message = "verification failed: uv-managed Pwndbg r2pipe package not found"
-            if message not in self.failures:
-                self.failures.append(message)
-            self.error(message)
-
-        if pwndbg_packages_ok:
-            if self.pwndbg_launcher_available():
-                self.ok("pwndbg launcher loads uv-managed Pwndbg exactly once")
+        if "pwndbg" not in self.compat_skips:
+            pwndbg_packages_ok = self.r2pipe_target_available()
+            if pwndbg_packages_ok:
+                self.ok(
+                    f"Pwndbg r2pipe {R2PIPE_VERSION}: included in the uv tool environment"
+                )
             else:
                 ok_all = False
-                message = "verification failed: Pwndbg launcher unavailable or double-loaded"
-                has_detail = any(
-                    failure.startswith("Pwndbg launcher failed or loaded twice")
-                    for failure in self.failures
-                )
-                if not has_detail and message not in self.failures:
+                message = "verification failed: uv-managed Pwndbg r2pipe package not found"
+                if message not in self.failures:
                     self.failures.append(message)
-                self.error(
-                    message + (" (see detailed failure above)" if has_detail else "")
-                )
-            pwndbg_backend_ok = self.pwndbg_backend_available()
-            if pwndbg_backend_ok:
-                self.ok("system GDB automatically loads uv-managed Pwndbg")
-                if self.pwndbg_r2ghidra_available():
-                    self.ok("Pwndbg r2ghidra integration and ghidra command")
+                self.error(message)
+
+            if pwndbg_packages_ok:
+                if self.pwndbg_launcher_available():
+                    self.ok("pwndbg launcher loads uv-managed Pwndbg exactly once")
                 else:
                     ok_all = False
-                    message = "verification failed: Pwndbg r2ghidra integration unavailable"
+                    message = "verification failed: Pwndbg launcher unavailable or double-loaded"
                     has_detail = any(
-                        failure.startswith("Pwndbg r2ghidra bridge verification failed")
+                        failure.startswith("Pwndbg launcher failed or loaded twice")
                         for failure in self.failures
                     )
                     if not has_detail and message not in self.failures:
@@ -3706,18 +3788,35 @@ except gdb.error:
                     self.error(
                         message + (" (see detailed failure above)" if has_detail else "")
                     )
-            else:
-                ok_all = False
-                message = "verification failed: system GDB Pwndbg auto-load unavailable"
-                has_detail = any(
-                    failure.startswith("Pwndbg system GDB import failed")
-                    for failure in self.failures
-                )
-                if not has_detail and message not in self.failures:
-                    self.failures.append(message)
-                self.error(
-                    message + (" (see detailed failure above)" if has_detail else "")
-                )
+                pwndbg_backend_ok = self.pwndbg_backend_available()
+                if pwndbg_backend_ok:
+                    self.ok("system GDB automatically loads uv-managed Pwndbg")
+                    if self.pwndbg_r2ghidra_available():
+                        self.ok("Pwndbg r2ghidra integration and ghidra command")
+                    else:
+                        ok_all = False
+                        message = "verification failed: Pwndbg r2ghidra integration unavailable"
+                        has_detail = any(
+                            failure.startswith("Pwndbg r2ghidra bridge verification failed")
+                            for failure in self.failures
+                        )
+                        if not has_detail and message not in self.failures:
+                            self.failures.append(message)
+                        self.error(
+                            message + (" (see detailed failure above)" if has_detail else "")
+                        )
+                else:
+                    ok_all = False
+                    message = "verification failed: system GDB Pwndbg auto-load unavailable"
+                    has_detail = any(
+                        failure.startswith("Pwndbg system GDB import failed")
+                        for failure in self.failures
+                    )
+                    if not has_detail and message not in self.failures:
+                        self.failures.append(message)
+                    self.error(
+                        message + (" (see detailed failure above)" if has_detail else "")
+                    )
 
         go_version = self.go_version()
         if go_version:
@@ -3729,21 +3828,22 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        node_probe = self.node_environment_probe()
-        node_output = (node_probe.stdout or "").lower()
-        node_ok = node_probe.returncode == 0 and all(
-            label in node_output
-            for label in ("nvm ", "node v", "npm ", "corepack ", "pnpm ", "yarn ")
-        )
-        if node_ok:
-            versions = ", ".join((node_probe.stdout or "").strip().splitlines())
-            self.ok(f"Node.js toolchain: {versions}")
-        else:
-            ok_all = False
-            message = "verification failed: Node.js LTS/Corepack/pnpm/Yarn environment unavailable"
-            if message not in self.failures:
-                self.failures.append(message)
-            self.error(message)
+        if "node" not in self.compat_skips:
+            node_probe = self.node_environment_probe()
+            node_output = (node_probe.stdout or "").lower()
+            node_ok = node_probe.returncode == 0 and all(
+                label in node_output
+                for label in ("nvm ", "node v", "npm ", "corepack ", "pnpm ", "yarn ")
+            )
+            if node_ok:
+                versions = ", ".join((node_probe.stdout or "").strip().splitlines())
+                self.ok(f"Node.js toolchain: {versions}")
+            else:
+                ok_all = False
+                message = "verification failed: Node.js LTS/Corepack/pnpm/Yarn environment unavailable"
+                if message not in self.failures:
+                    self.failures.append(message)
+                self.error(message)
 
         rust_probe = self.rust_environment_probe()
         rust_output = (rust_probe.stdout or "").lower()
@@ -3830,6 +3930,11 @@ Usage:
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
 
+Ubuntu 18.04+ and current Kali are accepted. Older Ubuntu uses an isolated
+Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
+Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
+instead of installing current Pwndbg. System Python and glibc are not replaced.
+
 The default operation skips usable tools. --update refreshes managed language
 toolchains and repositories. The default operation also migrates the legacy
 portable Pwndbg installation to system GDB plus uv. Neither install mode runs
@@ -3837,7 +3942,7 @@ full-upgrade or autoremove.
 """.strip()
 
 
-def main(argv: list[str]) -> int:
+def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
