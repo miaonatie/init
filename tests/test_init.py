@@ -47,11 +47,89 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.bootstrap.download_installer("test", "http://example.com/install.sh")
 
-    def test_supports_only_modern_ubuntu_and_kali(self):
+    def test_supports_ubuntu_1804_and_newer_and_kali(self):
         self.assertTrue(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": "24.04"}))
         self.assertTrue(MODULE.Bootstrap.supported_distro({"id": "kali", "version": "2026.2"}))
-        self.assertFalse(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": "22.04"}))
+        for version in ("18.04", "20.04", "22.04", "26.04"):
+            self.assertTrue(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": version}))
+        for version in ("16.04", "18.03", "", "bad"):
+            self.assertFalse(MODULE.Bootstrap.supported_distro({"id": "ubuntu", "version": version}))
         self.assertFalse(MODULE.Bootstrap.supported_distro({"id": "debian", "version": "13"}))
+
+    def test_legacy_package_aliases_and_optional_absence(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.package_available = mock.Mock(return_value=False)
+        self.assertEqual(self.bootstrap.compatible_packages(
+            ["7zip", "bind9-dnsutils", "libncurses-dev", "python-is-python3", "gcc"]),
+            ["p7zip-full", "dnsutils", "libncurses5-dev", "gcc"])
+        self.assertEqual(self.bootstrap.compatible_packages(["bat"], optional=True), [])
+        self.assertIn("bat", self.bootstrap.compat_skips)
+        self.assertFalse(self.bootstrap.failures)
+
+    def test_legacy_core_package_failure_is_not_hidden(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.apt_update = mock.Mock(return_value=True)
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.package_available = mock.Mock(return_value=False)
+        self.assertEqual(self.bootstrap.compatible_packages(["gcc"]), ["gcc"])
+        self.assertNotIn("gcc", self.bootstrap.compat_skips)
+        self.bootstrap.apt_update.return_value = False
+        self.assertEqual(self.bootstrap.compatible_packages(["bat"], optional=True), ["bat"])
+        self.assertNotIn("bat", self.bootstrap.compat_skips)
+
+    def test_legacy_python_environment_is_reused_without_sudo(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.install_uv = mock.Mock(return_value=True)
+        self.bootstrap.run = mock.Mock()
+        self.bootstrap.update_managed_block = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE, "HOME", Path(directory)), mock.patch.dict(MODULE.os.environ):
+            python = Path(self.bootstrap.system_python())
+            python.parent.mkdir(parents=True)
+            python.touch()
+            self.assertTrue(self.bootstrap.prepare_python_tools())
+            self.bootstrap.run.assert_not_called()
+            self.assertEqual(MODULE.os.environ["PATH"].split(":")[0], str(python.parent))
+            self.assertEqual(self.bootstrap.update_managed_block.call_count, 2)
+
+    def test_legacy_python_install_does_not_use_sudo(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "20.04"}
+        self.bootstrap.find_usable_command = mock.Mock(return_value="tool")
+        self.bootstrap.run = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, "capstone\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ])
+        self.bootstrap.install_python_tools()
+        call = self.bootstrap.run.call_args
+        self.assertFalse(call.kwargs["sudo"])
+        self.assertEqual(call.args[0][0], self.bootstrap.system_python())
+
+    def test_old_gdb_is_preserved_when_pwndbg_is_incompatible(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.gdb_python_abi = mock.Mock(return_value=("3.6", "libpython3.6m.so.1.0"))
+        self.bootstrap.install_uv = mock.Mock(return_value=True)
+        self.bootstrap.remove_legacy_pwndbg_portable = mock.Mock()
+        self.bootstrap.install_pwndbg_uv = mock.Mock()
+        self.bootstrap.install_pwndbg_environment()
+        self.assertIn("pwndbg", self.bootstrap.compat_skips)
+        self.bootstrap.remove_legacy_pwndbg_portable.assert_not_called()
+        self.bootstrap.install_pwndbg_uv.assert_not_called()
+
+    def test_old_glibc_does_not_attempt_node_lts(self):
+        self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
+        self.bootstrap.install_nvm = mock.Mock()
+        self.bootstrap.install_node_environment()
+        self.bootstrap.install_nvm.assert_not_called()
+        self.assertIn("node", self.bootstrap.compat_skips)
+
+    def test_python36_grammar_and_annotations(self):
+        import ast
+        source = (ROOT / "init.py").read_text()
+        ast.parse(source, feature_version=(3, 6))
+        self.assertNotIn("from __future__ import annotations", source)
+        for annotation in MODULE.Bootstrap.run.__annotations__.values():
+            self.assertTrue(isinstance(annotation, (str, type)) or annotation is None)
 
     @mock.patch.object(MODULE.time, "sleep")
     def test_apt_update_rejects_partial_index(self, _sleep):
@@ -169,7 +247,8 @@ class InstallerTests(unittest.TestCase):
         install_call = self.bootstrap.run.call_args
         command = install_call.args[0]
         self.assertNotIn("--user", command)
-        self.assertIn("--break-system-packages", command)
+        self.assertNotIn("--break-system-packages", command)
+        self.assertEqual(install_call.kwargs["env"]["PIP_BREAK_SYSTEM_PACKAGES"], "1")
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
         self.assertTrue(install_call.kwargs["sudo"])
