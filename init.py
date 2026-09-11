@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Idempotent CTF workstation bootstrap for Ubuntu and Kali."""
 
+import errno
 import os
 import platform
 import pwd
@@ -517,6 +518,12 @@ class Bootstrap:
             Path("/usr/local/go/bin"),
         ]
         current = os.environ.get("PATH", "").split(os.pathsep)
+        if self.is_wsl:
+            # WSL imports Windows PATH. Install Linux tools, not Windows Python
+            # entry points with missing interpreters. Only this process changes;
+            # the user's shell profiles and Windows interoperability stay intact.
+            current = [entry for entry in current
+                       if not re.match(r"^/mnt/[a-z](?:/|$)", entry, re.IGNORECASE)]
         for candidate in reversed(candidates):
             value = str(candidate)
             if value not in current:
@@ -558,6 +565,13 @@ class Bootstrap:
                     stderr=subprocess.PIPE if capture else None,
                     timeout=timeout,
                 )
+            except OSError as exc:
+                # which() can find a file whose shebang interpreter is missing,
+                # a foreign binary, or a launcher that is no longer executable.
+                # Treat it as an unusable command so callers can install/repair it.
+                code = 127 if exc.errno == errno.ENOENT else 126
+                result = subprocess.CompletedProcess(final, code, "", str(exc))
+                break  # Retrying a local launch error will not repair the entry point.
             except subprocess.TimeoutExpired as exc:
                 stdout = self.output_text(exc.stdout)
                 stderr = self.output_text(exc.stderr)

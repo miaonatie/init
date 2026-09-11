@@ -21,6 +21,47 @@ class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.bootstrap = MODULE.Bootstrap()
 
+    def test_wsl_installer_path_excludes_windows_drives_only_in_process(self):
+        self.bootstrap.is_wsl = True
+        original = "/mnt/c/Users/test/Python/Scripts:/usr/bin:/mnt/D/Programs:/mnt/data/bin"
+        with mock.patch.dict(MODULE.os.environ, {"PATH": original}):
+            self.bootstrap._extend_path()
+            paths = MODULE.os.environ["PATH"].split(MODULE.os.pathsep)
+            self.assertNotIn("/mnt/c/Users/test/Python/Scripts", paths)
+            self.assertNotIn("/mnt/D/Programs", paths)
+            self.assertIn("/usr/bin", paths)
+            self.assertIn("/mnt/data/bin", paths)
+            first = MODULE.os.environ["PATH"]
+            self.bootstrap._extend_path()
+            self.assertEqual(MODULE.os.environ["PATH"], first)
+
+    def test_non_wsl_installer_keeps_mounted_drive_paths(self):
+        self.bootstrap.is_wsl = False
+        with mock.patch.dict(MODULE.os.environ, {"PATH": "/mnt/c/tools:/usr/bin"}):
+            self.bootstrap._extend_path()
+            self.assertIn("/mnt/c/tools", MODULE.os.environ["PATH"].split(":"))
+
+    def test_existing_launcher_with_missing_interpreter_is_unusable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / "ROPgadget"
+            launcher.write_text("#!/nonexistent/windows/python.exe\n")
+            launcher.chmod(0o755)
+            with mock.patch.dict(MODULE.os.environ, {"PATH": directory}):
+                self.assertIsNotNone(self.bootstrap.find_command(["ROPgadget"]))
+                self.assertIsNone(self.bootstrap.find_usable_command(["ROPgadget"], ["--help"]))
+                self.assertFalse(self.bootstrap.executable_usable(str(launcher), ["--help"]))
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    self.bootstrap.run([str(launcher)], capture=True)
+                self.assertEqual(caught.exception.returncode, 127)
+
+    def test_local_exec_error_is_not_retried_as_network_failure(self):
+        for error in (PermissionError(13, "permission denied"), OSError(8, "exec format error")):
+            with mock.patch.object(MODULE.subprocess, "run", side_effect=error) as run, mock.patch.object(MODULE.time, "sleep") as sleep:
+                result = self.bootstrap.run(["bad-tool"], check=False, capture=True, network=True)
+                self.assertEqual(result.returncode, 126)
+                run.assert_called_once()
+                sleep.assert_not_called()
+
     def test_version_has_single_source_of_truth(self):
         self.assertEqual(MODULE.VERSION, (ROOT / "VERSION").read_text(encoding="utf-8").strip())
 
