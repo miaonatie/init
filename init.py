@@ -534,6 +534,8 @@ class Bootstrap:
                     cwd=str(cwd) if cwd else None,
                     env=merged_env,
                     universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
                     stdout=subprocess.PIPE if capture else None,
                     stderr=subprocess.PIPE if capture else None,
                     timeout=timeout,
@@ -1577,6 +1579,8 @@ class Bootstrap:
                 list(commands), COMMAND_PROBE_ARGUMENTS[package]
             ) is None
         )
+        if self.ubuntu_before("24.04") and not (Path(python).parent / "ipython").is_file():
+            missing.append("ipython")
         if not missing:
             self.ok("Python tools: already installed")
             return

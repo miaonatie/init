@@ -123,6 +123,13 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_nvm.assert_not_called()
         self.assertIn("node", self.bootstrap.compat_skips)
 
+    def test_subprocess_decodes_non_ascii_output_without_utf8_locale(self):
+        result = self.bootstrap.run(
+            [sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([0xc3, 0xa9, 0xff]))"],
+            capture=True, env={"LC_ALL": "C"},
+        )
+        self.assertEqual(result.stdout, "\u00e9\ufffd")
+
     def test_python36_grammar_and_annotations(self):
         import ast
         source = (ROOT / "init.py").read_text()
