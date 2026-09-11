@@ -1617,19 +1617,28 @@ class Bootstrap:
             self.ok("Python tools: already installed")
             return
         missing = list(dict.fromkeys(missing))
-        result = self.run(
-            [
+        command = [
                 python, "-m", "pip", "install",
                 "--disable-pip-version-check", *PIP_NETWORK_OPTIONS,
-                "--upgrade", *missing,
-            ],
+                "--only-binary=lief", "--upgrade",
+        ]
+        result = self.run(
+            command + missing,
             sudo=not self.ubuntu_before("24.04"),
             check=False,
             env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
         )
         if result.returncode != 0:
-            self.failures.append("Python CTF package installation failed")
-            return
+            # A single incompatible package must not prevent all Pwn tools installing.
+            self.warn("Python package batch failed; retrying packages independently")
+            for package in missing:
+                retry = self.run(
+                    command + [package],
+                    sudo=not self.ubuntu_before("24.04"), check=False,
+                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                )
+                if retry.returncode != 0:
+                    self.failures.append(f"Python package installation failed: {package}")
         self._extend_path()
         broken = [
             package for package, commands in PYTHON_COMMAND_PACKAGES.items()
@@ -1849,6 +1858,8 @@ class Bootstrap:
         install = self.run(
             ["r2pm", "-ci", "r2ghidra"],
             check=False,
+            network=True,
+            env={"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "true"},
             timeout=1800,
         )
         if install.returncode != 0:
