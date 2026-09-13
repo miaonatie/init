@@ -266,5 +266,74 @@ verify_new = '''        if self.glibc_aio_runtime_available() and self.glibc_aio
 if verify_old not in text:
     raise SystemExit("glibc verify anchor not found")
 text = text.replace(verify_old, verify_new, 1)
-
 path.write_text(text, encoding="utf-8")
+
+# Add focused unit tests without touching the existing test structure.
+test_path = Path("tests/test_init.py")
+tests = test_path.read_text(encoding="utf-8")
+marker = "\n\nif __name__ == \"__main__\":\n"
+if marker not in tests:
+    raise SystemExit("test file footer not found")
+if "test_glibc_latest_packages_selects_latest_revision_per_arch" not in tests:
+    new_tests = r'''
+    def test_glibc_latest_packages_selects_latest_revision_per_arch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            aio.mkdir()
+            (aio / "list").write_text(
+                "2.35-0ubuntu3_amd64\n"
+                "2.35-0ubuntu3.15_amd64\n"
+                "2.35-0ubuntu3_i386\n"
+                "2.35-0ubuntu3.15_i386\n"
+                "2.39-0ubuntu8.9_amd64\n"
+                "2.39-0ubuntu8.9_i386\n"
+                "2.39-0ubuntu8.9_arm64\n",
+                encoding="utf-8",
+            )
+            real_run = self.bootstrap.run
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio):
+                self.bootstrap.run = mock.Mock(side_effect=real_run)
+                latest = self.bootstrap.glibc_aio_latest_packages()
+            self.assertEqual(latest[("2.35", "amd64")], "2.35-0ubuntu3.15_amd64")
+            self.assertEqual(latest[("2.35", "i386")], "2.35-0ubuntu3.15_i386")
+            self.assertEqual(latest[("2.39", "amd64")], "2.39-0ubuntu8.9_amd64")
+            self.assertNotIn(("2.39", "arm64"), latest)
+
+    def test_glibc_library_reuses_downloads_and_creates_compact_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            library = root / "glibc"
+            package = "2.35-0ubuntu3.15_amd64"
+            target = aio / "libs" / package
+            target.mkdir(parents=True)
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={("2.35", "amd64"): package}
+            )
+
+            def fake_run(command, **kwargs):
+                if command[:2] == ["mkdir", "-p"]:
+                    Path(command[2]).mkdir(parents=True, exist_ok=True)
+                elif command[:2] == ["ln", "-sfn"]:
+                    link = Path(command[3])
+                    if link.exists() or link.is_symlink():
+                        link.unlink()
+                    link.symlink_to(command[2])
+                elif "download" in command:
+                    self.fail("existing libc must not be downloaded again")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            self.bootstrap.run = mock.Mock(side_effect=fake_run)
+            with (
+                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
+                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
+            ):
+                self.assertTrue(self.bootstrap.configure_glibc_library())
+                link = library / "2.35" / "amd64"
+                self.assertTrue(link.is_symlink())
+                self.assertEqual(link.resolve(), target.resolve())
+                self.assertTrue(self.bootstrap.glibc_library_available())
+'''
+    tests = tests.replace(marker, "\n" + new_tests + marker, 1)
+    test_path.write_text(tests, encoding="utf-8")
