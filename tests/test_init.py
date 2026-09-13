@@ -21,6 +21,35 @@ class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.bootstrap = MODULE.Bootstrap()
 
+    def test_user_path_profiles_find_later_installed_tools_and_are_idempotent(self):
+        with tempfile.TemporaryDirectory(prefix="init home ") as directory:
+            home = Path(directory)
+            bashrc, zshrc = home / ".bashrc", home / ".zshrc"
+            with mock.patch.object(MODULE, "BASHRC", bashrc), mock.patch.object(MODULE, "ZSHRC", zshrc):
+                self.bootstrap.configure_user_path()
+                first = bashrc.read_text()
+                self.bootstrap.configure_user_path()
+                self.assertEqual(first, bashrc.read_text())
+                self.assertEqual(first, zshrc.read_text())
+            local = home / ".local/bin"
+            local.mkdir(parents=True)
+            launcher = local / "codex"
+            launcher.write_text("#!/bin/sh\nprintf 'linux-codex'\n")
+            launcher.chmod(0o755)
+            original = f"/mnt/c/Program Files/tools:/usr/bin:{local}:/usr/bin:/tmp/a*b::"
+            expected = f"{local}:{home}/bin:/mnt/c/Program Files/tools:/usr/bin:/tmp/a*b:"
+            for shell in ("bash", "zsh"):
+                executable = MODULE.shutil.which(shell)
+                if not executable:
+                    continue
+                with self.subTest(shell=shell):
+                    result = subprocess.run(
+                        [executable, "-f", "-c", '. "$1"; . "$1"; printf "%s\\n" "$PATH"; codex', "test", str(bashrc)],
+                        env={"HOME": str(home), "PATH": original},
+                        capture_output=True, text=True, check=True,
+                    )
+                    self.assertEqual(result.stdout, expected + "\nlinux-codex")
+
     def test_wsl_installer_path_excludes_windows_drives_only_in_process(self):
         self.bootstrap.is_wsl = True
         original = "/mnt/c/Users/test/Python/Scripts:/usr/bin:/mnt/D/Programs:/mnt/data/bin"
@@ -700,12 +729,14 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.enable_i386 = mock.Mock(return_value=list(MODULE.I386_APT))
         self.bootstrap.apt_install = mock.Mock(return_value=True)
         self.bootstrap.install_command_links = mock.Mock()
+        self.bootstrap.configure_user_path = mock.Mock()
         self.bootstrap.install_fastfetch = mock.Mock()
         self.bootstrap.configure_vim = mock.Mock()
         self.bootstrap.configure_tmux = mock.Mock()
         self.bootstrap.install_oh_my_zsh = mock.Mock()
         self.bootstrap.install_docker = mock.Mock()
         self.bootstrap.install_system_foundation()
+        self.bootstrap.configure_user_path.assert_called_once_with()
         calls = self.bootstrap.apt_install.call_args_list
         self.assertEqual([call.args[1] for call in calls], [
             "system and development packages",
