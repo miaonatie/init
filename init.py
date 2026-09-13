@@ -867,6 +867,7 @@ class Bootstrap:
         return ok_all
 
     def install_system_foundation(self) -> None:
+        self.configure_user_path()
         if self.distro["id"] == "ubuntu":
             if self.ubuntu_universe_enabled():
                 self.ok("Ubuntu universe repository: already enabled")
@@ -900,6 +901,28 @@ class Bootstrap:
         self.configure_tmux()
         self.install_oh_my_zsh()
         self.install_docker()
+
+    def configure_user_path(self) -> None:
+        # Keep paths even before tools are installed. Preserve spaces, glob
+        # characters and Windows interoperability; first occurrence wins.
+        body = '''_init_path_rest="$HOME/.local/bin:$HOME/bin:$PATH:"
+_init_path_result=:
+while [ -n "$_init_path_rest" ]; do
+    _init_path_entry=${_init_path_rest%%:*}
+    _init_path_rest=${_init_path_rest#*:}
+    case "$_init_path_result" in
+        *:"$_init_path_entry":*) ;;
+        *) _init_path_result="${_init_path_result}${_init_path_entry}:" ;;
+    esac
+done
+_init_path_result=${_init_path_result#:}
+export PATH=${_init_path_result%:}
+unset _init_path_rest _init_path_result _init_path_entry'''
+        for profile in (BASHRC, ZSHRC):
+            self.update_managed_block(
+                profile, "# >>> init user PATH >>>", "# <<< init user PATH <<<", body
+            )
+        self.ok("User command PATH configured for Bash and Zsh")
 
     @staticmethod
     def ubuntu_universe_enabled() -> bool:
