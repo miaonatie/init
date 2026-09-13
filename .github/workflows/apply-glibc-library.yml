@@ -16,9 +16,11 @@ jobs:
         with:
           ref: feature/glibc-library-index
       - name: Apply patch
-        run: python3 tools/apply_glibc_library_patch.py
+        run: |
+          python3 tools/apply_glibc_library_patch.py
+          python3 tools/fix_glibc_tests.py
       - name: Remove temporary patch machinery
-        run: rm -f tools/apply_glibc_library_patch.py .github/workflows/apply-glibc-library.yml
+        run: rm -f tools/apply_glibc_library_patch.py tools/fix_glibc_tests.py .github/workflows/apply-glibc-library.yml
       - name: Syntax and unit tests
         run: |
           python3 -m py_compile init.py tests/test_init.py
