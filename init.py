@@ -3528,7 +3528,9 @@ except gdb.error:
         latest: dict[tuple[str, str], str] = {}
         arches = "|".join(re.escape(arch) for arch in GLIBC_LIBRARY_ARCHES)
         pattern = re.compile(
-            rf"^(?P<version>\d+\.\d+)-.+_(?P<arch>{arches})$"
+            rf"^(?P<version>\d+\.\d+)-"
+            rf"(?P<revision>[0-9A-Za-z.+~:-]+)_"
+            rf"(?P<arch>{arches})$"
         )
         for raw in lines:
             package = raw.strip()
@@ -3560,6 +3562,23 @@ except gdb.error:
         (version, arch), _package = item
         return tuple(int(part) for part in version.split(".")), arch
 
+    @staticmethod
+    def glibc_package_payload_available(target: Path) -> bool:
+        try:
+            return target.is_dir() and (target / "libc.so.6").is_file()
+        except OSError:
+            return False
+
+    @staticmethod
+    def glibc_package_target(package: str):
+        libs_root = (GLIBC_AIO_DIR / "libs").resolve(strict=False)
+        target = libs_root / package
+        try:
+            target.resolve(strict=False).relative_to(libs_root)
+        except (OSError, ValueError):
+            return None
+        return target
+
     def configure_glibc_library(self) -> bool:
         packages = self.glibc_aio_latest_packages()
         if not packages:
@@ -3571,8 +3590,24 @@ except gdb.error:
         for (version, arch), package in sorted(
             packages.items(), key=self.glibc_package_sort_key
         ):
-            target = GLIBC_AIO_DIR / "libs" / package
-            if not target.is_dir():
+            target = self.glibc_package_target(package)
+            if target is None:
+                self.failures.append(f"glibc index contains an unsafe package path: {package}")
+                return False
+
+            if not self.glibc_package_payload_available(target):
+                if target.exists() or target.is_symlink():
+                    self.info(f"glibc {version} {arch}: removing incomplete {package}")
+                    try:
+                        if target.is_symlink() or target.is_file():
+                            target.unlink()
+                        else:
+                            shutil.rmtree(str(target))
+                    except OSError as exc:
+                        self.failures.append(
+                            f"glibc incomplete download cleanup failed: {package}: {exc}"
+                        )
+                        return False
                 self.info(f"glibc {version} {arch}: downloading {package}")
                 download = self.run(
                     [str(GLIBC_AIO_COMMAND), "download", package, "--no-dbg"],
@@ -3581,7 +3616,10 @@ except gdb.error:
                     network=True,
                     timeout=600,
                 )
-                if download.returncode != 0 or not target.is_dir():
+                if (
+                    download.returncode != 0
+                    or not self.glibc_package_payload_available(target)
+                ):
                     self.failures.append(f"glibc download failed: {package}")
                     return False
 
@@ -3625,9 +3663,13 @@ except gdb.error:
         if not packages:
             return False
         for (version, arch), package in packages.items():
-            target = GLIBC_AIO_DIR / "libs" / package
+            target = self.glibc_package_target(package)
             link = GLIBC_LIBRARY_ROOT / version / arch
-            if not target.is_dir() or not link.is_symlink():
+            if (
+                target is None
+                or not self.glibc_package_payload_available(target)
+                or not link.is_symlink()
+            ):
                 return False
             try:
                 if link.resolve(strict=True) != target.resolve(strict=True):

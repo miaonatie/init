@@ -2158,7 +2158,9 @@ class InstallerTests(unittest.TestCase):
                 "2.35-0ubuntu3.15_i386\n"
                 "2.39-0ubuntu8.9_amd64\n"
                 "2.39-0ubuntu8.9_i386\n"
-                "2.39-0ubuntu8.9_arm64\n",
+                "2.39-0ubuntu8.9_arm64\n"
+                "2.39-../../escape_amd64\n"
+                "2.39-bad/revision_i386\n",
                 encoding="utf-8",
             )
             real_run = self.bootstrap.run
@@ -2178,6 +2180,7 @@ class InstallerTests(unittest.TestCase):
             package = "2.35-0ubuntu3.15_amd64"
             target = aio / "libs" / package
             target.mkdir(parents=True)
+            (target / "libc.so.6").touch()
             self.bootstrap.glibc_aio_latest_packages = mock.Mock(
                 return_value={("2.35", "amd64"): package}
             )
@@ -2204,6 +2207,113 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(link.resolve(), target.resolve())
                 self.assertTrue(self.bootstrap.glibc_library_available())
+                self.assertTrue(self.bootstrap.configure_glibc_library())
+                link_commands = [
+                    call.args[0]
+                    for call in self.bootstrap.run.call_args_list
+                    if call.args[0][:2] == ["ln", "-sfn"]
+                ]
+                self.assertEqual(len(link_commands), 1)
+
+    def test_glibc_library_downloads_missing_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            library = root / "glibc"
+            package = "2.35-0ubuntu3.15_amd64"
+            target = aio / "libs" / package
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={("2.35", "amd64"): package}
+            )
+
+            def fake_run(command, **kwargs):
+                if "download" in command:
+                    target.mkdir(parents=True)
+                    (target / "libc.so.6").touch()
+                elif command[:2] == ["mkdir", "-p"]:
+                    Path(command[2]).mkdir(parents=True, exist_ok=True)
+                elif command[:2] == ["ln", "-sfn"]:
+                    Path(command[3]).symlink_to(command[2])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            self.bootstrap.run = mock.Mock(side_effect=fake_run)
+            with (
+                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
+                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
+                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", root / "glibc-aio"),
+            ):
+                self.assertTrue(self.bootstrap.configure_glibc_library())
+            download_commands = [
+                call.args[0]
+                for call in self.bootstrap.run.call_args_list
+                if "download" in call.args[0]
+            ]
+            self.assertEqual(
+                download_commands,
+                [[str(root / "glibc-aio"), "download", package, "--no-dbg"]],
+            )
+
+    def test_glibc_library_rejects_incomplete_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            package = "2.35-0ubuntu3.15_amd64"
+            target = aio / "libs" / package
+            target.mkdir(parents=True)
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={("2.35", "amd64"): package}
+            )
+
+            def fake_run(command, **_kwargs):
+                if "download" in command:
+                    target.mkdir(parents=True, exist_ok=True)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            self.bootstrap.run = mock.Mock(side_effect=fake_run)
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio):
+                self.assertFalse(self.bootstrap.configure_glibc_library())
+            self.assertIn(f"glibc download failed: {package}", self.bootstrap.failures)
+
+    def test_glibc_library_verification_rejects_empty_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            library = root / "glibc"
+            package = "2.35-0ubuntu3.15_amd64"
+            target = aio / "libs" / package
+            target.mkdir(parents=True)
+            link = library / "2.35" / "amd64"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(target)
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={("2.35", "amd64"): package}
+            )
+            with (
+                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
+                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
+            ):
+                self.assertFalse(self.bootstrap.glibc_library_available())
+
+    def test_glibc_library_rejects_target_symlink_outside_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio = root / "glibc-all-in-one"
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "libc.so.6").touch()
+            package = "2.35-0ubuntu3.15_amd64"
+            target = aio / "libs" / package
+            target.parent.mkdir(parents=True)
+            target.symlink_to(outside, target_is_directory=True)
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={("2.35", "amd64"): package}
+            )
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio):
+                self.assertFalse(self.bootstrap.configure_glibc_library())
+            self.assertIn(
+                f"glibc index contains an unsafe package path: {package}",
+                self.bootstrap.failures,
+            )
 
 
 if __name__ == "__main__":
