@@ -120,6 +120,8 @@ GLIBC_AIO_DIR = TOOLS_DIR / "glibc-all-in-one"
 LIBC_DATABASE_DIR = TOOLS_DIR / "libc-database"
 GLIBC_AIO_COMMAND = Path("/usr/local/bin/glibc-aio")
 GLIBC_AIO_DEPENDENCIES = ("pyelftools", "zstandard")
+GLIBC_LIBRARY_ROOT = Path("/glibc")
+GLIBC_LIBRARY_ARCHES = ("amd64", "i386")
 LIBC_DATABASE_COMMANDS = {
     "libc-db-identify": "identify",
     "libc-db-find": "find",
@@ -3426,13 +3428,6 @@ except gdb.error:
         project_file = GLIBC_AIO_DIR / "pyproject.toml"
         runtime_ready = project_file.exists() and self.glibc_aio_runtime_available()
         index_ready = self.glibc_aio_index_available()
-        if (
-            not self.update_existing
-            and runtime_ready
-            and index_ready
-        ):
-            self.ok(f"glibc-aio: already configured ({GLIBC_AIO_COMMAND})")
-            return
         if not project_file.exists() and (GLIBC_AIO_DIR / ".git").exists():
             self.info("glibc-all-in-one: updating the legacy checkout to v2")
             update = self.run(
@@ -3503,7 +3498,7 @@ except gdb.error:
                 )
                 return
 
-        if not index_ready:
+        if self.update_existing or not index_ready:
             self.info("glibc-all-in-one: updating the libc package index")
             update_list = self.run(
                 [str(GLIBC_AIO_COMMAND), "mirror", "update"],
@@ -3515,7 +3510,131 @@ except gdb.error:
             if update_list.returncode != 0 or not self.glibc_aio_index_available():
                 self.failures.append("glibc-all-in-one libc index update failed")
                 return
-        self.ok(f"glibc-aio: configured and usable from any directory ({GLIBC_AIO_COMMAND})")
+
+        if not self.configure_glibc_library():
+            return
+        self.ok(
+            f"glibc-aio and compact glibc library configured "
+            f"({GLIBC_AIO_COMMAND}; {GLIBC_LIBRARY_ROOT})"
+        )
+
+    def glibc_aio_latest_packages(self) -> 'dict[tuple[str, str], str]':
+        libc_list = GLIBC_AIO_DIR / "list"
+        try:
+            lines = libc_list.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return {}
+
+        latest: dict[tuple[str, str], str] = {}
+        arches = "|".join(re.escape(arch) for arch in GLIBC_LIBRARY_ARCHES)
+        pattern = re.compile(
+            rf"^(?P<version>\d+\.\d+)-.+_(?P<arch>{arches})$"
+        )
+        for raw in lines:
+            package = raw.strip()
+            match = pattern.fullmatch(package)
+            if match is None:
+                continue
+            key = (match.group("version"), match.group("arch"))
+            current = latest.get(key)
+            if current is None:
+                latest[key] = package
+                continue
+            candidate_version = package.rsplit("_", 1)[0]
+            current_version = current.rsplit("_", 1)[0]
+            newer = self.run(
+                [
+                    "dpkg", "--compare-versions",
+                    candidate_version, "gt", current_version,
+                ],
+                check=False,
+                capture=True,
+                timeout=30,
+            )
+            if newer.returncode == 0:
+                latest[key] = package
+        return latest
+
+    @staticmethod
+    def glibc_package_sort_key(item: 'tuple[tuple[str, str], str]') -> 'tuple[tuple[int, ...], str]':
+        (version, arch), _package = item
+        return tuple(int(part) for part in version.split(".")), arch
+
+    def configure_glibc_library(self) -> bool:
+        packages = self.glibc_aio_latest_packages()
+        if not packages:
+            self.failures.append(
+                "glibc library configuration failed: no amd64/i386 packages in the index"
+            )
+            return False
+
+        for (version, arch), package in sorted(
+            packages.items(), key=self.glibc_package_sort_key
+        ):
+            target = GLIBC_AIO_DIR / "libs" / package
+            if not target.is_dir():
+                self.info(f"glibc {version} {arch}: downloading {package}")
+                download = self.run(
+                    [str(GLIBC_AIO_COMMAND), "download", package, "--no-dbg"],
+                    cwd=HOME,
+                    check=False,
+                    network=True,
+                    timeout=600,
+                )
+                if download.returncode != 0 or not target.is_dir():
+                    self.failures.append(f"glibc download failed: {package}")
+                    return False
+
+            version_dir = GLIBC_LIBRARY_ROOT / version
+            create_dir = self.run(
+                ["mkdir", "-p", str(version_dir)],
+                sudo=True,
+                check=False,
+            )
+            if create_dir.returncode != 0:
+                self.failures.append(f"glibc library directory creation failed: {version_dir}")
+                return False
+
+            link = version_dir / arch
+            if (link.exists() or link.is_symlink()) and not link.is_symlink():
+                self.failures.append(
+                    f"glibc library path exists and is not a symlink: {link}"
+                )
+                return False
+            try:
+                current_target = link.resolve(strict=False) if link.is_symlink() else None
+                wanted_target = target.resolve(strict=False)
+            except OSError:
+                current_target = None
+                wanted_target = target
+            if current_target == wanted_target:
+                continue
+
+            create_link = self.run(
+                ["ln", "-sfn", str(target), str(link)],
+                sudo=True,
+                check=False,
+            )
+            if create_link.returncode != 0:
+                self.failures.append(f"glibc library link failed: {link}")
+                return False
+        return True
+
+    def glibc_library_available(self) -> bool:
+        packages = self.glibc_aio_latest_packages()
+        if not packages:
+            return False
+        for (version, arch), package in packages.items():
+            target = GLIBC_AIO_DIR / "libs" / package
+            link = GLIBC_LIBRARY_ROOT / version / arch
+            if not target.is_dir() or not link.is_symlink():
+                return False
+            try:
+                if link.resolve(strict=True) != target.resolve(strict=True):
+                    return False
+            except OSError:
+                return False
+        return True
 
     def glibc_aio_runtime_available(self) -> bool:
         if self._glibc_runtime_cache is not None:
@@ -3990,6 +4109,18 @@ except gdb.error:
         else:
             ok_all = False
             message = "verification failed: glibc-aio runtime, dependencies or index unavailable"
+            if message not in self.failures:
+                self.failures.append(message)
+            self.error(message)
+
+        if self.glibc_library_available():
+            self.ok(
+                f"glibc library: {GLIBC_LIBRARY_ROOT} "
+                "(latest amd64/i386 packages linked)"
+            )
+        else:
+            ok_all = False
+            message = "verification failed: compact /glibc library unavailable"
             if message not in self.failures:
                 self.failures.append(message)
             self.error(message)
