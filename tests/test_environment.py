@@ -17,7 +17,7 @@ class EnvironmentTests(unittest.TestCase):
 
     def test_python_interpreter_matrix(self):
         for distro, version, isolated in [('ubuntu', '18.04', True), ('ubuntu', '20.04', True),
-                                         ('ubuntu', '22.04', True), ('ubuntu', '24.04', False),
+                                         ('ubuntu', '22.04', True), ('ubuntu', '24.04', True),
                                          ('ubuntu', '26.04', True), ('kali', '2026.3', True)]:
             with self.subTest(distro=distro, version=version):
                 self.b.distro = {'id': distro, 'version': version}
@@ -123,6 +123,21 @@ class EnvironmentTests(unittest.TestCase):
             self.b.install_ruby_tools()
             self.assertEqual(self.b.run.call_args[0][0][-1], expected)
 
+    def test_ruby25_zsteg_downgrade_activates_compatible_version(self):
+        self.b.distro = {'id': 'ubuntu', 'version': '18.04'}
+        self.b.command_exists = mock.Mock(return_value=True)
+        self.b.find_usable_command = mock.Mock(side_effect=[
+            '/bin/one_gadget', '/bin/seccomp-tools', None,
+            '/bin/one_gadget', '/bin/seccomp-tools', '/usr/local/bin/zsteg'])
+        self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        self.b.install_command_wrapper = mock.Mock(return_value=True)
+        self.b.install_ruby_tools()
+        self.assertIn('zsteg:0.2.12', self.b.run.call_args[0][0])
+        wrapper = self.b.install_command_wrapper.call_args[0][1]
+        self.assertIn('gem "zsteg", "= 0.2.12"', wrapper)
+        self.assertIn('"$@"', wrapper)
+        self.assertFalse(self.b.failures)
+
     def test_every_registered_probe_rejects_import_and_loader_errors(self):
         for name, arguments in init.COMMAND_PROBE_ARGUMENTS.items():
             for error in ('ModuleNotFoundError', 'ImportError', 'error while loading shared libraries',
@@ -181,6 +196,7 @@ class EnvironmentTests(unittest.TestCase):
     def test_neowofetch_version_exit_is_narrowly_allowed(self):
         for name, args, code, output, expected in [
             ('neowofetch', ['--version'], 1, 'Neofetch 7.2.0', True),
+            ('neowofetch', ['--version'], 1, 'Neowofetch 7.3.11', True),
             ('tool', ['--version'], 1, 'Neofetch 7.2.0', False),
             ('neowofetch', ['--version'], 2, 'Neofetch 7.2.0', False),
             ('neowofetch', ['--version'], 1, 'broken', False),

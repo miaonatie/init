@@ -360,7 +360,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(MODULE.LIBC_DATABASE_DIR, MODULE.TOOLS_DIR / "libc-database")
         self.assertEqual(self.bootstrap.python2_prefix().parents[2], MODULE.TOOLS_DIR)
 
-    def test_python_install_uses_break_system_packages_globally(self):
+    def test_python_install_uses_managed_environment_without_sudo(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
         self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result, subprocess.CompletedProcess([], 0, "", "")])
@@ -373,7 +373,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(install_call[1]["env"]["PIP_BREAK_SYSTEM_PACKAGES"], "1")
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
-        self.assertTrue(install_call[1]["sudo"])
+        self.assertFalse(install_call[1]["sudo"])
 
     def test_python_broken_launchers_reinstalled_after_upgrade_noop(self):
         for repaired in (True, False):
@@ -1883,8 +1883,8 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertEqual(editable_call[0][0][-2:], ["--editable", "."])
             self.assertEqual(editable_call[1]["cwd"], destination)
-            self.assertTrue(dependency_call[1]["sudo"])
-            self.assertTrue(editable_call[1]["sudo"])
+            self.assertFalse(dependency_call[1]["sudo"])
+            self.assertFalse(editable_call[1]["sudo"])
             self.assertEqual(
                 index_call[0][0], [str(command_path), "mirror", "update"]
             )
@@ -2100,7 +2100,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_ctf_toolchain_installs_uv_pwndbg_after_r2ghidra(self):
         names = [
-            "install_python2_legacy", "install_python_tools", "install_ruby_tools",
+            "install_python2_legacy", "prepare_python_tools", "install_python_tools", "install_ruby_tools",
             "install_node_environment", "install_go_environment", "install_rust_environment",
             "install_radare2", "install_r2ghidra", "install_pwndbg_environment",
             "install_helper_repositories", "repair_distro_python_commands",
@@ -2110,7 +2110,7 @@ class InstallerTests(unittest.TestCase):
         for name in names:
             def record(*_args, _name=name, **_kwargs):
                 calls.append(_name)
-                return True if _name == "install_radare2" else None
+                return True if _name in {"install_radare2", "prepare_python_tools"} else None
             setattr(
                 self.bootstrap,
                 name,

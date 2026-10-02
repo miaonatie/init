@@ -433,7 +433,7 @@ class Bootstrap:
         )
         version_exit = (Path(executable).name in {"neowofetch", "neofetch"}
                         and arguments == ["--version"] and result.returncode == 1
-                        and bool(re.search(r"\bneofetch\s+[0-9]", output)))
+                        and bool(re.search(r"\b(?:neofetch|neowofetch)\s+[0-9]", output)))
         usable = (
             (result.returncode == 0 or usage_exit or version_exit)
             and not any(marker in output for marker in broken_markers)
@@ -1650,10 +1650,9 @@ class Bootstrap:
         )
 
     def uses_managed_python(self) -> bool:
-        # Ubuntu 24.04's Python 3.12 is compatible. Keep both old Ubuntu and
-        # rolling/new distro interpreters separate from the CTF package stack.
-        return (self.distro["id"] == "kali" or self.ubuntu_before("24.04")
-                or (self.distro["id"] == "ubuntu" and not self.ubuntu_before("26.04")))
+        # Isolate pip from APT-owned packages even when the system Python
+        # version is compatible (e.g. IPython/traitlets on Ubuntu 24.04).
+        return self.distro["id"] in {"ubuntu", "kali"}
 
     def prepare_python_tools(self) -> bool:
         if not self.uses_managed_python():
@@ -1841,7 +1840,8 @@ class Bootstrap:
             self.ok("Ruby CTF tools: already installed")
             return
         if self.ubuntu_before("22.04"):
-            versions = {"one_gadget": "1.7.3", "seccomp-tools": "1.5.0", "zsteg": "0.2.13"}
+            versions = {"one_gadget": "1.7.3", "seccomp-tools": "1.5.0",
+                        "zsteg": "0.2.12" if self.ubuntu_before("20.04") else "0.2.13"}
             missing = [f"{gem}:{versions[gem]}" for gem in missing]
             self.info("using Ruby CTF tool versions compatible with older Ubuntu")
         result = self.run(
@@ -1856,6 +1856,13 @@ class Bootstrap:
                 gem = spec.split(":", 1)[0]
                 if not self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]):
                     self.run(["gem", "install", "--no-document", spec], sudo=True, check=False)
+        if self.ubuntu_before("20.04") and "zsteg:0.2.12" in missing:
+            # 0.2.13 uses Ruby 2.6 syntax but permits installation on Ruby 2.5.
+            # Explicit activation also repairs hosts with that newer gem present.
+            code = 'gem "zsteg", "= 0.2.12"; load Gem.bin_path("zsteg", "zsteg", "0.2.12")'
+            wrapper = '#!/bin/sh\nexec /usr/bin/ruby -e ' + shlex.quote(code) + ' -- "$@"\n'
+            if not self.install_command_wrapper(Path("/usr/local/bin/zsteg"), wrapper):
+                self.failures.append("Ruby 2.5 zsteg wrapper installation failed")
         broken = [
             gem for gem in RUBY_GEMS
             if self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]) is None
@@ -4343,8 +4350,7 @@ Usage:
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
 
-Ubuntu 18.04+ and current Kali are accepted. Kali, Ubuntu before 24.04 and
-Ubuntu 26.04+ use an isolated Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
+Ubuntu 18.04+ and current Kali use an isolated Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
 Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
 instead of installing current Pwndbg. System Python and glibc are not replaced.
 
