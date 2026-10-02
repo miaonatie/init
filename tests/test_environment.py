@@ -30,15 +30,15 @@ class EnvironmentTests(unittest.TestCase):
         with mock.patch.object(os, 'geteuid', return_value=1000), mock.patch.object(
                 subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             self.b.run(['/usr/bin/python3', '-m', 'pip', '--version'], sudo=True, env=overrides, capture=True)
-        self.assertEqual(run.call_args.args[0], ['sudo', 'env', 'PIP_BREAK_SYSTEM_PACKAGES=1',
+        self.assertEqual(run.call_args[0][0], ['sudo', 'env', 'PIP_BREAK_SYSTEM_PACKAGES=1',
                          'DEBIAN_FRONTEND=noninteractive', '/usr/bin/python3', '-m', 'pip', '--version'])
 
     def test_root_does_not_use_sudo(self):
         with mock.patch.object(os, 'geteuid', return_value=0), mock.patch.object(
                 subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
             self.b.run(['true'], sudo=True, env={'PIP_BREAK_SYSTEM_PACKAGES': '1'}, capture=True)
-        self.assertEqual(run.call_args.args[0], ['true'])
-        self.assertEqual(run.call_args.kwargs['env']['PIP_BREAK_SYSTEM_PACKAGES'], '1')
+        self.assertEqual(run.call_args[0][0], ['true'])
+        self.assertEqual(run.call_args[1]['env']['PIP_BREAK_SYSTEM_PACKAGES'], '1')
 
     def test_failed_version_probes_never_pass(self):
         for code in (1, 2, 124, 126, 127, -11):

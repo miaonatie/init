@@ -20,6 +20,7 @@ SPEC.loader.exec_module(MODULE)
 class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.bootstrap = MODULE.Bootstrap()
+        self.bootstrap.distro = {"id": "ubuntu", "version": "24.04", "codename": "noble", "ubuntu_codename": "noble", "name": "Ubuntu"}
 
     def test_wsl_installer_path_excludes_windows_drives_only_in_process(self):
         self.bootstrap.is_wsl = True
@@ -143,8 +144,8 @@ class InstallerTests(unittest.TestCase):
         ])
         self.bootstrap.install_python_tools()
         call = self.bootstrap.run.call_args
-        self.assertFalse(call.kwargs["sudo"])
-        self.assertEqual(call.args[0][0], self.bootstrap.system_python())
+        self.assertFalse(call[1]["sudo"])
+        self.assertEqual(call[0][0][0], self.bootstrap.system_python())
 
     def test_old_gdb_is_preserved_when_pwndbg_is_incompatible(self):
         self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
@@ -216,7 +217,7 @@ class InstallerTests(unittest.TestCase):
     def test_python36_grammar_and_annotations(self):
         import ast
         source = (ROOT / "init.py").read_text()
-        ast.parse(source, feature_version=(3, 6))
+        ast.parse(source, **({"feature_version": (3, 6)} if sys.version_info >= (3, 8) else {}))
         self.assertNotIn("from __future__ import annotations", source)
         for annotation in MODULE.Bootstrap.run.__annotations__.values():
             self.assertTrue(isinstance(annotation, (str, type)) or annotation is None)
@@ -270,7 +271,7 @@ class InstallerTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(["apt-get"], 0, stdout="", stderr="")
         )
         self.assertFalse(self.bootstrap.apt_install(["kept", "gone"], "test", required=True))
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertIn("kept", command)
         self.assertNotIn("gone", command)
         self.assertIn("APT package unavailable: gone", self.bootstrap.failures)
@@ -283,7 +284,7 @@ class InstallerTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(["apt-get"], 0, stdout="", stderr="")
         )
         self.assertTrue(self.bootstrap.apt_install(["sample"], "test", required=True))
-        self.assertNotIn("network", self.bootstrap.run.call_args.kwargs)
+        self.assertNotIn("network", self.bootstrap.run.call_args[1])
 
     def test_apt_failed_batch_falls_back_to_chunks_not_every_package(self):
         packages = [f"package-{index}" for index in range(18)]
@@ -302,7 +303,7 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.bootstrap.apt_install(packages, "test", required=True))
         self.assertEqual(self.bootstrap.run.call_count, 4)
         fallback_sizes = [
-            len(call.args[0]) - call.args[0].index("--no-install-recommends") - 1
+            len(call[0][0]) - call[0][0].index("--no-install-recommends") - 1
             for call in self.bootstrap.run.call_args_list[1:]
         ]
         self.assertEqual(fallback_sizes, [8, 8, 2])
@@ -364,13 +365,13 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
         install_call = self.bootstrap.run.call_args
-        command = install_call.args[0]
+        command = install_call[0][0]
         self.assertNotIn("--user", command)
         self.assertNotIn("--break-system-packages", command)
-        self.assertEqual(install_call.kwargs["env"]["PIP_BREAK_SYSTEM_PACKAGES"], "1")
+        self.assertEqual(install_call[1]["env"]["PIP_BREAK_SYSTEM_PACKAGES"], "1")
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
-        self.assertTrue(install_call.kwargs["sudo"])
+        self.assertTrue(install_call[1]["sudo"])
 
     def test_python_broken_launchers_reinstalled_after_upgrade_noop(self):
         for repaired in (True, False):
@@ -385,8 +386,8 @@ class InstallerTests(unittest.TestCase):
                     "/bin/ropper" if repaired else None,
                 ])
                 bootstrap.install_python_tools()
-                repairs = [c.args[0] for c in bootstrap.run.call_args_list
-                           if "--force-reinstall" in c.args[0]]
+                repairs = [c[0][0] for c in bootstrap.run.call_args_list
+                           if "--force-reinstall" in c[0][0]]
                 self.assertEqual([c[-1] for c in repairs], ["ROPgadget", "ropper"])
                 self.assertTrue(all("--no-deps" in c for c in repairs))
                 self.assertEqual(bool(bootstrap.failures), not repaired)
@@ -426,7 +427,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
         self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertIn("capstone", command)
         self.assertNotIn("ROPgadget", command)
         self.assertNotIn("ropper", command)
@@ -440,7 +441,7 @@ class InstallerTests(unittest.TestCase):
             subprocess.CompletedProcess([], 1),
         ])
         self.bootstrap.install_python_tools()
-        commands = [call.args[0] for call in self.bootstrap.run.call_args_list[1:]]
+        commands = [call[0][0] for call in self.bootstrap.run.call_args_list[1:]]
         self.assertEqual(commands[1][-1], "pwntools")
         self.assertEqual(commands[2][-1], "lief")
         self.assertTrue(all("--only-binary=lief" in command for command in commands))
@@ -486,7 +487,7 @@ class InstallerTests(unittest.TestCase):
             )
             with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
                 self.bootstrap.install_python2_legacy()
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertTrue(any(command[1:3] == ["install", "-s"] for command in commands))
             self.assertFalse(any("global" in command for command in commands))
 
@@ -504,7 +505,7 @@ class InstallerTests(unittest.TestCase):
 
             self.bootstrap.run = mock.Mock(side_effect=run)
             self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertIn(
                 ["ln", "-sf", str(python2.resolve()), "/usr/local/bin/python2"],
                 commands,
@@ -539,7 +540,7 @@ class InstallerTests(unittest.TestCase):
             with mock.patch.object(MODULE, "PYTHON2_COMMAND_DIR", command_dir):
                 self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
 
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertFalse(any(command[0] in {"ln", "install"} for command in commands))
 
     def test_python2_runtime_bootstraps_missing_pip_before_wrapper(self):
@@ -562,7 +563,7 @@ class InstallerTests(unittest.TestCase):
 
             self.bootstrap.run = mock.Mock(side_effect=run)
             self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertIn(
                 [str(python2.resolve()), "-m", "ensurepip", "--upgrade"],
                 commands,
@@ -613,7 +614,7 @@ class InstallerTests(unittest.TestCase):
 
         self.bootstrap.install_docker()
 
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertIn("--reinstall", command)
         self.assertEqual(self.bootstrap.run.call_count, 1)
         self.assertEqual(self.bootstrap.failures, [])
@@ -640,10 +641,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.run = mock.Mock(
                 return_value=subprocess.CompletedProcess(["dpkg"], 0, stdout="amd64\n", stderr="")
             )
-            with (
-                mock.patch.object(MODULE, "DOCKER_KEYRING", keyring),
-                mock.patch.object(MODULE, "DOCKER_SOURCE", source_path),
-            ):
+            with mock.patch.object(MODULE, "DOCKER_KEYRING", keyring), mock.patch.object(MODULE, "DOCKER_SOURCE", source_path):
                 self.assertTrue(self.bootstrap.setup_docker_repository())
             self.bootstrap.run.assert_called_once()
 
@@ -709,7 +707,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.summary = mock.Mock(return_value=0)
         with redirect_stdout(io.StringIO()):
             self.assertEqual(self.bootstrap.install(), 0)
-        titles = [call.args[0] for call in self.bootstrap.run_stage.call_args_list]
+        titles = [call[0][0] for call in self.bootstrap.run_stage.call_args_list]
         self.assertEqual(
             titles,
             ["Environment check", "System foundation", "CTF toolchain", "Verification"],
@@ -727,16 +725,16 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_docker = mock.Mock()
         self.bootstrap.install_system_foundation()
         calls = self.bootstrap.apt_install.call_args_list
-        self.assertEqual([call.args[1] for call in calls], [
+        self.assertEqual([call[0][1] for call in calls], [
             "system and development packages",
             "daily CLI tools",
             "CTF CLI tools",
             "32-bit development support",
         ])
-        self.assertEqual(calls[0].args[0], MODULE.REQUIRED_APT)
-        self.assertEqual(calls[1].args[0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
-        self.assertEqual(calls[2].args[0], MODULE.CTF_APT)
-        self.assertEqual(calls[3].args[0], MODULE.I386_APT)
+        self.assertEqual(calls[0][0][0], MODULE.REQUIRED_APT)
+        self.assertEqual(calls[1][0][0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
+        self.assertEqual(calls[2][0][0], MODULE.CTF_APT)
+        self.assertEqual(calls[3][0][0], MODULE.I386_APT)
         self.bootstrap.install_fastfetch.assert_called_once_with()
         self.bootstrap.configure_vim.assert_called_once_with()
         self.bootstrap.configure_tmux.assert_called_once_with()
@@ -773,7 +771,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run = mock.Mock(side_effect=run)
         self.bootstrap.install_fastfetch()
 
-        commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+        commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
         curl = next(command for command in commands if command[0] == "curl")
         self.assertIn(
             "https://github.com/fastfetch-cli/fastfetch/releases/latest/download/"
@@ -797,7 +795,7 @@ class InstallerTests(unittest.TestCase):
 
         self.bootstrap.install_fastfetch()
 
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertIn("--reinstall", command)
         self.assertEqual(command[-1], "fastfetch")
         self.assertEqual(self.bootstrap.run.call_count, 1)
@@ -890,15 +888,7 @@ class InstallerTests(unittest.TestCase):
                 path.parent.mkdir(parents=True)
                 path.touch()
             zshrc = root / ".zshrc"
-            with (
-                mock.patch.object(MODULE, "OH_MY_ZSH_DIR", omz),
-                mock.patch.object(MODULE, "ZSHRC", zshrc),
-                mock.patch.object(
-                    MODULE.pwd,
-                    "getpwuid",
-                    return_value=mock.Mock(pw_shell="/usr/bin/zsh"),
-                ),
-            ):
+            with mock.patch.object(MODULE, "OH_MY_ZSH_DIR", omz), mock.patch.object(MODULE, "ZSHRC", zshrc), mock.patch.object( MODULE.pwd, "getpwuid", return_value=mock.Mock(pw_shell="/usr/bin/zsh"), ):
                 self.bootstrap.configure_oh_my_zsh_rc()
                 self.assertTrue(self.bootstrap.oh_my_zsh_ready())
 
@@ -914,10 +904,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run.assert_not_called()
 
     def test_sudo_entry_is_rejected_before_root_owned_dotfiles_are_created(self):
-        with (
-            mock.patch.object(MODULE.os, "geteuid", return_value=0),
-            mock.patch.dict(MODULE.os.environ, {"SUDO_USER": "alice"}, clear=False),
-        ):
+        with mock.patch.object(MODULE.os, "geteuid", return_value=0), mock.patch.dict(MODULE.os.environ, {"SUDO_USER": "alice"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "do not run.*with sudo"):
                 self.bootstrap.require_sudo()
 
@@ -965,10 +952,7 @@ class InstallerTests(unittest.TestCase):
             bashrc = root / ".bashrc"
             zshrc = root / ".zshrc"
             bashrc.write_text("export CUSTOM_SETTING=1\n", encoding="utf-8")
-            with (
-                mock.patch.object(MODULE, "BASHRC", bashrc),
-                mock.patch.object(MODULE, "ZSHRC", zshrc),
-            ):
+            with mock.patch.object(MODULE, "BASHRC", bashrc), mock.patch.object(MODULE, "ZSHRC", zshrc):
                 self.assertTrue(self.bootstrap.configure_node_shells())
                 self.assertTrue(self.bootstrap.configure_rust_shells())
                 self.assertTrue(self.bootstrap.configure_node_shells())
@@ -998,7 +982,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_node_environment()
 
         call = self.bootstrap.run_node_shell.call_args
-        commands = call.args[0]
+        commands = call[0][0]
         self.assertIn("nvm install --lts", commands)
         self.assertIn("nvm alias default 'lts/*'", commands)
         self.assertIn("nvm use --lts", commands)
@@ -1006,8 +990,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("corepack enable", commands)
         self.assertIn("corepack install --global pnpm@latest", commands)
         self.assertIn("corepack install --global yarn@stable", commands)
-        self.assertNotIn("network", call.kwargs)
-        self.assertEqual(call.kwargs["timeout"], 900)
+        self.assertNotIn("network", call[1])
+        self.assertEqual(call[1]["timeout"], 900)
         self.assertEqual(self.bootstrap.failures, [])
 
     def test_healthy_node_environment_skips_all_network_updates(self):
@@ -1032,7 +1016,7 @@ class InstallerTests(unittest.TestCase):
 
         self.bootstrap.install_node_environment()
 
-        commands = self.bootstrap.run_node_shell.call_args.args[0]
+        commands = self.bootstrap.run_node_shell.call_args[0][0]
         self.assertIn("nvm use --silent default", commands)
         self.assertNotIn("nvm install --lts", commands)
         self.assertIn("npm install --global corepack@latest", commands)
@@ -1047,7 +1031,7 @@ class InstallerTests(unittest.TestCase):
 
         self.bootstrap.run_node_shell("nvm install --lts")
 
-        environment = self.bootstrap.run.call_args.kwargs["env"]
+        environment = self.bootstrap.run.call_args[1]["env"]
         self.assertEqual(environment["NVM_INSTALL_LOCK_TIMEOUT"], "20")
         self.assertEqual(environment["NVM_INSTALL_LOCK_STALE"], "10")
 
@@ -1084,8 +1068,8 @@ class InstallerTests(unittest.TestCase):
 
             self.assertTrue(nvm_dir.is_dir())
             call = self.bootstrap.run.call_args
-            self.assertEqual(call.kwargs["env"]["NVM_DIR"], str(nvm_dir))
-            self.assertEqual(call.kwargs["env"]["PROFILE"], "/dev/null")
+            self.assertEqual(call[1]["env"]["NVM_DIR"], str(nvm_dir))
+            self.assertEqual(call[1]["env"]["PROFILE"], "/dev/null")
 
     def test_existing_rustup_updates_stable_and_standard_components(self):
         self.bootstrap.update_existing = True
@@ -1101,13 +1085,10 @@ class InstallerTests(unittest.TestCase):
             )
             self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
             self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
-            with (
-                mock.patch.object(MODULE, "CARGO_HOME", cargo_home),
-                mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home),
-            ):
+            with mock.patch.object(MODULE, "CARGO_HOME", cargo_home), mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home):
                 self.bootstrap.install_rust_environment()
 
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertEqual(commands[0], [str(rustup), "update", "stable"])
             self.assertEqual(commands[1], [str(rustup), "default", "stable"])
             self.assertEqual(
@@ -1118,7 +1099,7 @@ class InstallerTests(unittest.TestCase):
                 ],
             )
             self.assertTrue(
-                all("network" not in call.kwargs for call in self.bootstrap.run.call_args_list)
+                all("network" not in call[1] for call in self.bootstrap.run.call_args_list)
             )
             self.assertEqual(self.bootstrap.failures, [])
 
@@ -1138,7 +1119,7 @@ class InstallerTests(unittest.TestCase):
             with mock.patch.object(MODULE, "CARGO_HOME", cargo_home):
                 self.bootstrap.install_rust_environment()
 
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertEqual(
                 commands,
                 [[
@@ -1161,14 +1142,11 @@ class InstallerTests(unittest.TestCase):
             )
             self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
             self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
-            with (
-                mock.patch.object(MODULE, "CARGO_HOME", cargo_home),
-                mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home),
-            ):
+            with mock.patch.object(MODULE, "CARGO_HOME", cargo_home), mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home):
                 self.bootstrap.install_rust_environment()
 
             self.bootstrap.run.assert_called_once()
-            command = self.bootstrap.run.call_args.args[0]
+            command = self.bootstrap.run.call_args[0][0]
             self.assertEqual(command[:2], ["sh", str(installer)])
             self.assertNotIn("update", command)
             self.assertEqual(self.bootstrap.failures, [])
@@ -1246,7 +1224,7 @@ class InstallerTests(unittest.TestCase):
             )
             with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
                 self.assertTrue(self.bootstrap.install_radare2())
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertEqual(
                 commands[0],
                 ["git", "-C", str(source), "pull", "--ff-only", "origin", "master"],
@@ -1266,12 +1244,12 @@ class InstallerTests(unittest.TestCase):
             return_value=subprocess.CompletedProcess(["r2pm"], 0)
         )
         self.bootstrap.install_r2ghidra()
-        commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+        commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
         self.assertEqual(commands, [["r2pm", "-U"], ["r2pm", "-ci", "r2ghidra"]])
-        self.assertTrue(self.bootstrap.run.call_args_list[0].kwargs["network"])
-        self.assertTrue(self.bootstrap.run.call_args_list[1].kwargs["network"])
+        self.assertTrue(self.bootstrap.run.call_args_list[0][1]["network"])
+        self.assertTrue(self.bootstrap.run.call_args_list[1][1]["network"])
         self.assertEqual(
-            self.bootstrap.run.call_args_list[1].kwargs["env"]["GIT_TERMINAL_PROMPT"],
+            self.bootstrap.run.call_args_list[1][1]["env"]["GIT_TERMINAL_PROMPT"],
             "0",
         )
         self.assertEqual(self.bootstrap.failures, [])
@@ -1320,7 +1298,7 @@ class InstallerTests(unittest.TestCase):
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv())
 
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertEqual(command[:3], ["/home/test/.local/bin/uv", "tool", "install"])
         self.assertIn("--python", command)
         self.assertEqual(
@@ -1334,7 +1312,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(MODULE.PWNDBG_UV_SPEC, command)
         self.assertIn("--no-progress", command)
         self.assertNotIn("pwndbg-gdb", " ".join(command))
-        self.assertTrue(self.bootstrap.run.call_args.kwargs["capture"])
+        self.assertTrue(self.bootstrap.run.call_args[1]["capture"])
 
     def test_healthy_uv_pwndbg_skips_network_install(self):
         self.bootstrap.install_uv = mock.Mock(return_value=True)
@@ -1362,13 +1340,13 @@ class InstallerTests(unittest.TestCase):
         )
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv(force=True))
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertEqual(command[1:3], ["tool", "upgrade"])
         self.assertNotIn("--upgrade", command)
         self.assertIn("--reinstall", command)
         self.assertIn(MODULE.PWNDBG_TOOL_NAME, command)
         self.assertNotIn(MODULE.PWNDBG_UV_SPEC, command)
-        self.assertNotIn("network", self.bootstrap.run.call_args.kwargs)
+        self.assertNotIn("network", self.bootstrap.run.call_args[1])
 
     def test_broken_existing_uv_pwndbg_reinstalls_without_upgrading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1390,7 +1368,7 @@ class InstallerTests(unittest.TestCase):
 
             self.assertTrue(self.bootstrap.install_pwndbg_uv())
 
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertIn("--reinstall", command)
         self.assertNotIn("--upgrade", command)
 
@@ -1419,11 +1397,7 @@ class InstallerTests(unittest.TestCase):
                 stderr="",
             )
         )
-        with (
-            mock.patch.object(MODULE.Path, "is_file", return_value=True),
-            mock.patch.object(MODULE.os, "access", return_value=True),
-            mock.patch.object(MODULE.shutil, "which", return_value=None),
-        ):
+        with mock.patch.object(MODULE.Path, "is_file", return_value=True), mock.patch.object(MODULE.os, "access", return_value=True), mock.patch.object(MODULE.shutil, "which", return_value=None):
             self.assertEqual(
                 self.bootstrap.gdb_python_install_target(),
                 "/usr/bin/python3.13",
@@ -1440,11 +1414,7 @@ class InstallerTests(unittest.TestCase):
                 stderr="",
             )
         )
-        with (
-            mock.patch.object(MODULE.Path, "is_file", return_value=True),
-            mock.patch.object(MODULE.os, "access", return_value=True),
-            mock.patch.object(MODULE.shutil, "which", return_value=None),
-        ):
+        with mock.patch.object(MODULE.Path, "is_file", return_value=True), mock.patch.object(MODULE.os, "access", return_value=True), mock.patch.object(MODULE.shutil, "which", return_value=None):
             self.assertEqual(self.bootstrap.gdb_python_install_target(), "3.13")
 
     def test_pwndbg_uv_package_probe_uses_tool_python_and_imports_r2pipe(self):
@@ -1472,7 +1442,7 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(self.bootstrap.pwndbg_uv_packages_available())
 
         self.bootstrap.run.assert_called_once()
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertEqual(command[0], str(python))
         self.assertNotIn("gdb", command)
         self.assertTrue(any("import r2pipe" in argument for argument in command))
@@ -1538,10 +1508,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.pwndbg_site_packages_path = mock.Mock(
                 return_value=site_packages
             )
-            with (
-                mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", bridge),
-                mock.patch.object(MODULE, "GDBINIT", gdbinit),
-            ):
+            with mock.patch.object(MODULE, "PWNDBG_BRIDGE_SCRIPT", bridge), mock.patch.object(MODULE, "GDBINIT", gdbinit):
                 self.assertTrue(self.bootstrap.configure_pwndbg_system_gdb())
                 first = gdbinit.read_text(encoding="utf-8")
                 self.assertTrue(self.bootstrap.configure_pwndbg_system_gdb())
@@ -1626,17 +1593,7 @@ class InstallerTests(unittest.TestCase):
                 f"{MODULE.PWNDBG_LEGACY_GDBINIT_END}\n",
                 encoding="utf-8",
             )
-            with (
-                mock.patch.object(MODULE, "HOME", home),
-                mock.patch.object(MODULE, "BASHRC", bashrc),
-                mock.patch.object(MODULE, "ZSHRC", zshrc),
-                mock.patch.object(MODULE, "GDBINIT", gdbinit),
-                mock.patch.object(MODULE, "PWNDBG_PORTABLE_USER_DIR", user_portable),
-                mock.patch.object(MODULE, "PWNDBG_PORTABLE_SYSTEM_DIR", root / "system"),
-                mock.patch.object(MODULE, "PWNDBG_PORTABLE_COMMANDS", (user_command,)),
-                mock.patch.object(MODULE, "PWNDBG_LEGACY_PYTHON_DIR", legacy_python),
-                mock.patch.object(MODULE, "PWNDBG_LEGACY_CTF_COMMAND", root / "pwndbg-ctf"),
-            ):
+            with mock.patch.object(MODULE, "HOME", home), mock.patch.object(MODULE, "BASHRC", bashrc), mock.patch.object(MODULE, "ZSHRC", zshrc), mock.patch.object(MODULE, "GDBINIT", gdbinit), mock.patch.object(MODULE, "PWNDBG_PORTABLE_USER_DIR", user_portable), mock.patch.object(MODULE, "PWNDBG_PORTABLE_SYSTEM_DIR", root / "system"), mock.patch.object(MODULE, "PWNDBG_PORTABLE_COMMANDS", (user_command,)), mock.patch.object(MODULE, "PWNDBG_LEGACY_PYTHON_DIR", legacy_python), mock.patch.object(MODULE, "PWNDBG_LEGACY_CTF_COMMAND", root / "pwndbg-ctf"):
                 self.bootstrap.remove_legacy_pwndbg_portable()
                 self.bootstrap.remove_legacy_pwndbg_portable()
 
@@ -1667,7 +1624,7 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.bootstrap.pwndbg_backend_available())
         self.assertTrue(self.bootstrap.pwndbg_backend_available())
         self.bootstrap.run.assert_called_once()
-        command = self.bootstrap.run.call_args.args[0]
+        command = self.bootstrap.run.call_args[0][0]
         self.assertEqual(command[0], "gdb")
         self.assertIn("set debuginfod enabled off", command)
         self.assertTrue(any("INIT_PWNDBG_OK" in argument for argument in command))
@@ -1704,7 +1661,7 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue(self.bootstrap.pwndbg_launcher_available())
             self.assertTrue(self.bootstrap.pwndbg_launcher_available())
             self.bootstrap.run.assert_called_once()
-            command = self.bootstrap.run.call_args.args[0]
+            command = self.bootstrap.run.call_args[0][0]
             self.assertEqual(command[0], str(launcher))
             self.assertIn("--batch", command)
 
@@ -1877,7 +1834,7 @@ class InstallerTests(unittest.TestCase):
         )
 
         self.assertTrue(self.bootstrap.pwndbg_r2ghidra_available())
-        command = self.bootstrap.run.call_args_list[2].args[0]
+        command = self.bootstrap.run.call_args_list[2][0][0]
         self.assertEqual(command[0], "gdb")
         self.assertNotIn("-nx", command)
         self.assertIn("set debuginfod enabled off", command)
@@ -1887,7 +1844,7 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("break main", command)
         self.assertIn("ghidra &main", command)
         self.assertEqual(
-            self.bootstrap.run.call_args_list[2].kwargs["env"],
+            self.bootstrap.run.call_args_list[2][1]["env"],
             {"INIT_GHIDRA_PROBE": "1"},
         )
 
@@ -1913,21 +1870,18 @@ class InstallerTests(unittest.TestCase):
                 side_effect=[False, True]
             )
             self.bootstrap.configure_glibc_library = mock.Mock(return_value=True)
-            with (
-                mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination),
-                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path),
-            ):
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination), mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path):
                 self.bootstrap.install_glibc_all_in_one()
             dependency_call, editable_call, index_call = self.bootstrap.run.call_args_list
             self.assertEqual(
-                dependency_call.args[0][-2:], ["pyelftools", "zstandard"]
+                dependency_call[0][0][-2:], ["pyelftools", "zstandard"]
             )
-            self.assertEqual(editable_call.args[0][-2:], ["--editable", "."])
-            self.assertEqual(editable_call.kwargs["cwd"], destination)
-            self.assertTrue(dependency_call.kwargs["sudo"])
-            self.assertTrue(editable_call.kwargs["sudo"])
+            self.assertEqual(editable_call[0][0][-2:], ["--editable", "."])
+            self.assertEqual(editable_call[1]["cwd"], destination)
+            self.assertTrue(dependency_call[1]["sudo"])
+            self.assertTrue(editable_call[1]["sudo"])
             self.assertEqual(
-                index_call.args[0], [str(command_path), "mirror", "update"]
+                index_call[0][0], [str(command_path), "mirror", "update"]
             )
             self.bootstrap.install_command_wrapper.assert_called_once()
             self.assertEqual(self.bootstrap.failures, [])
@@ -1948,10 +1902,7 @@ class InstallerTests(unittest.TestCase):
             )
             self.bootstrap.configure_glibc_library = mock.Mock(return_value=True)
 
-            with (
-                mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination),
-                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path),
-            ):
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination), mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", command_path):
                 self.bootstrap.install_glibc_all_in_one()
 
             self.bootstrap.run.assert_called_once_with(
@@ -1979,7 +1930,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.configure_glibc_library = mock.Mock(return_value=True)
             with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
                 self.bootstrap.install_glibc_all_in_one()
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertEqual(len(commands), 3)
             self.assertEqual(commands[0][-2:], ["pyelftools", "zstandard"])
             self.assertEqual(commands[1][-2:], ["--editable", "."])
@@ -2005,7 +1956,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.configure_glibc_library = mock.Mock(return_value=True)
             with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
                 self.bootstrap.install_glibc_all_in_one()
-            commands = [call.args[0] for call in self.bootstrap.run.call_args_list]
+            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
             self.assertEqual(
                 commands[0],
                 [
@@ -2075,7 +2026,7 @@ class InstallerTests(unittest.TestCase):
                 self.bootstrap.configure_libc_database_commands()
 
             destinations = {
-                call.args[0] for call in self.bootstrap.install_command_wrapper.call_args_list
+                call[0][0] for call in self.bootstrap.install_command_wrapper.call_args_list
             }
             self.assertEqual(
                 destinations,
@@ -2218,10 +2169,7 @@ class InstallerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             self.bootstrap.run = mock.Mock(side_effect=fake_run)
-            with (
-                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
-                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
-            ):
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio), mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library):
                 self.assertTrue(self.bootstrap.configure_glibc_library())
                 link = library / "2.35" / "amd64"
                 self.assertTrue(link.is_symlink())
@@ -2229,9 +2177,9 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(self.bootstrap.glibc_library_available())
                 self.assertTrue(self.bootstrap.configure_glibc_library())
                 link_commands = [
-                    call.args[0]
+                    call[0][0]
                     for call in self.bootstrap.run.call_args_list
-                    if call.args[0][:2] == ["ln", "-sfn"]
+                    if call[0][0][:2] == ["ln", "-sfn"]
                 ]
                 self.assertEqual(len(link_commands), 1)
 
@@ -2257,16 +2205,12 @@ class InstallerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "", "")
 
             self.bootstrap.run = mock.Mock(side_effect=fake_run)
-            with (
-                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
-                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
-                mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", root / "glibc-aio"),
-            ):
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio), mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library), mock.patch.object(MODULE, "GLIBC_AIO_COMMAND", root / "glibc-aio"):
                 self.assertTrue(self.bootstrap.configure_glibc_library())
             download_commands = [
-                call.args[0]
+                call[0][0]
                 for call in self.bootstrap.run.call_args_list
-                if "download" in call.args[0]
+                if "download" in call[0][0]
             ]
             self.assertEqual(
                 download_commands,
@@ -2308,10 +2252,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.glibc_aio_latest_packages = mock.Mock(
                 return_value={("2.35", "amd64"): package}
             )
-            with (
-                mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio),
-                mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library),
-            ):
+            with mock.patch.object(MODULE, "GLIBC_AIO_DIR", aio), mock.patch.object(MODULE, "GLIBC_LIBRARY_ROOT", library):
                 self.assertFalse(self.bootstrap.glibc_library_available())
 
     def test_glibc_library_rejects_target_symlink_outside_cache(self):
