@@ -85,6 +85,8 @@ I386_APT = [
 
 PYTHON_IMPORT_PACKAGES = {
     "pwntools": "pwn",
+    "ROPgadget": "ropgadget",
+    "ropper": "ropper",
     "capstone": "capstone",
     "unicorn": "unicorn",
     "keystone-engine": "keystone",
@@ -1699,6 +1701,23 @@ class Bootstrap:
                 list(commands), COMMAND_PROBE_ARGUMENTS[package]
             ) is None
         ]
+        if broken:
+            # --upgrade can be a no-op when metadata is present but a launcher
+            # uses an old interpreter or package files have disappeared.
+            # Recreate only broken CLI packages; preserve shared dependencies.
+            for package in broken:
+                self.warn(f"Repairing broken Python command: {package}")
+                self.run(
+                    command + ["--force-reinstall", "--no-deps", package],
+                    sudo=not self.ubuntu_before("24.04"), check=False,
+                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                )
+            broken = [
+                package for package, commands in PYTHON_COMMAND_PACKAGES.items()
+                if self.find_usable_command(
+                    list(commands), COMMAND_PROBE_ARGUMENTS[package]
+                ) is None
+            ]
         if broken:
             self.failures.append(
                 "Python CTF command verification failed: " + ", ".join(broken)
