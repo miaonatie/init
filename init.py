@@ -258,7 +258,7 @@ COMMAND_PROBE_ARGUMENTS = {
     "ninja": ["--version"],
     "meson": ["--version"],
     "GNU linker": ["--version"],
-    "java": ["--version"],
+    "java": ["-version"],
     "javac": ["--version"],
     "ruby": ["--version"],
     "gem": ["--version"],
@@ -292,7 +292,7 @@ COMMAND_PROBE_ARGUMENTS = {
     "foremost": ["-V"],
     "tshark": ["--version"],
     "hashcat": ["--version"],
-    "john": ["--list=build-info"],
+    "john": [],
     "ROPgadget": ["--help"],
     "ropper": ["--version"],
     "one_gadget": ["--version"],
@@ -423,9 +423,12 @@ class Bootstrap:
             "cannot load such file",
             "loaderror",
         )
+        usage_exit = (
+            not arguments and result.returncode in {1, 2}
+            and ("usage" in output or "john the ripper" in output)
+        )
         return (
-            result.returncode >= 0
-            and result.returncode not in {124, 126, 127}
+            (result.returncode == 0 or usage_exit)
             and not any(marker in output for marker in broken_markers)
         )
 
@@ -548,7 +551,10 @@ class Bootstrap:
     ) -> 'subprocess.CompletedProcess[str]':
         final = list(command)
         if sudo and os.geteuid() != 0:
-            final = ["sudo", *final]
+            # sudo normally drops PIP_*/DEBIAN_FRONTEND/PYENV_* variables.
+            # Forward only the overrides explicitly requested by this call.
+            overrides = [f"{key}={value}" for key, value in (env or {}).items()]
+            final = ["sudo", "env", *overrides, *final] if overrides else ["sudo", *final]
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
