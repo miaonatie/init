@@ -198,7 +198,7 @@ class InstallerTests(unittest.TestCase):
             self.bootstrap.install_checksec_fallback()
             self.assertEqual(self.bootstrap.install_command_wrapper.call_count, len(MODULE.PWN_ENTRYPOINTS))
             for name in MODULE.PWN_ENTRYPOINTS:
-                output = subprocess.check_output([str(root / name), "a b", "--help"], text=True)
+                output = subprocess.check_output([str(root / name), "a b", "--help"], universal_newlines=True)
                 self.assertEqual(output.splitlines(), [name, "a b", "--help"])
 
     def test_missing_pwn_backend_is_a_failure(self):
@@ -1992,8 +1992,8 @@ class InstallerTests(unittest.TestCase):
             result = subprocess.run(
                 [str(wrapper), sample.name],
                 cwd=caller,
-                text=True,
-                capture_output=True,
+                universal_newlines=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 check=False,
             )
 
@@ -2080,7 +2080,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn(str(root / "custom bin"), MODULE.os.environ["PATH"].split(":"))
                 result = subprocess.run(
                     ["bash", "-c", '. "$1"; . "$1"; printf "%s" "$PATH"', "bash", str(bashrc)],
-                    env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=True,
+                    env={"PATH": "/usr/bin:/bin"}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True,
                 )
                 self.assertEqual(result.stdout.split(":").count(str(root / "custom bin")), 1)
             self.bootstrap.apt_install.assert_not_called()
