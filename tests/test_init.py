@@ -361,6 +361,7 @@ class InstallerTests(unittest.TestCase):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
         self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
+        self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
         install_call = self.bootstrap.run.call_args
         command = install_call.args[0]
@@ -370,6 +371,25 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
         self.assertTrue(install_call.kwargs["sudo"])
+
+    def test_python_broken_launchers_reinstalled_after_upgrade_noop(self):
+        for repaired in (True, False):
+            with self.subTest(repaired=repaired):
+                bootstrap = MODULE.Bootstrap()
+                bootstrap.ubuntu_before = mock.Mock(return_value=False)
+                bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
+                bootstrap.find_usable_command = mock.Mock(side_effect=[
+                    "/bin/pwn", None, None,
+                    "/bin/pwn", None, None,
+                    "/bin/pwn", "/bin/ROPgadget" if repaired else None,
+                    "/bin/ropper" if repaired else None,
+                ])
+                bootstrap.install_python_tools()
+                repairs = [c.args[0] for c in bootstrap.run.call_args_list
+                           if "--force-reinstall" in c.args[0]]
+                self.assertEqual([c[-1] for c in repairs], ["ROPgadget", "ropper"])
+                self.assertTrue(all("--no-deps" in c for c in repairs))
+                self.assertEqual(bool(bootstrap.failures), not repaired)
 
     def test_ipython_command_link_preserves_existing_installation(self):
         for existing in (None, "/custom/bin/ipython"):
