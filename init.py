@@ -87,6 +87,7 @@ PYTHON_IMPORT_PACKAGES = {
     "pwntools": "pwn",
     "ROPgadget": "ropgadget",
     "ropper": "ropper",
+    "ipython": "IPython",
     "capstone": "capstone",
     "unicorn": "unicorn",
     "keystone-engine": "keystone",
@@ -106,6 +107,7 @@ PYTHON_COMMAND_PACKAGES = {
     "pwntools": ("pwn",),
     "ROPgadget": ("ROPgadget", "ropgadget"),
     "ropper": ("ropper",),
+    "ipython": ("ipython", "ipython3"),
 }
 
 PYTHON_PACKAGES = list(dict.fromkeys([*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]))
@@ -271,7 +273,7 @@ COMMAND_PROBE_ARGUMENTS = {
     "gdb-multiarch": ["--version"],
     "checksec": ["--help"],
     "patchelf": ["--version"],
-    "xxd": ["-h"],
+    "xxd": ["-v"],
     "qemu-user": ["--version"],
     "qemu-system": ["--version"],
     "bat": ["--version"],
@@ -287,7 +289,7 @@ COMMAND_PROBE_ARGUMENTS = {
     "steghide": ["--version"],
     "stegseek": ["--version"],
     "binwalk": ["--help"],
-    "zsteg": ["--version"],
+    "zsteg": ["--help"],
     "exiftool": ["-ver"],
     "foremost": ["-V"],
     "tshark": ["--version"],
@@ -339,6 +341,8 @@ class Bootstrap:
         self.apt_updated = False
         self.update_existing = update_existing
         self._package_cache: dict[str, bool] = {}
+        self._available_package_cache: dict[str, bool] = {}
+        self._probe_errors: dict[str, str] = {}
         self._docker_ready_cache: bool | None = None
         self._node_runtime_probe_cache: subprocess.CompletedProcess[str] | None = None
         self._node_probe_cache: subprocess.CompletedProcess[str] | None = None
@@ -427,10 +431,18 @@ class Bootstrap:
             not arguments and result.returncode in {1, 2}
             and ("usage" in output or "john the ripper" in output)
         )
-        return (
-            (result.returncode == 0 or usage_exit)
+        version_exit = (Path(executable).name in {"neowofetch", "neofetch"}
+                        and arguments == ["--version"] and result.returncode == 1
+                        and bool(re.search(r"\bneofetch\s+[0-9]", output)))
+        usable = (
+            (result.returncode == 0 or usage_exit or version_exit)
             and not any(marker in output for marker in broken_markers)
         )
+        if not usable:
+            self._probe_errors[executable] = self.probe_error_details(result) or f"exit {result.returncode}"
+        else:
+            self._probe_errors.pop(executable, None)
+        return usable
 
     @staticmethod
     def detect_distro() -> 'dict[str, str]':
@@ -676,12 +688,16 @@ class Bootstrap:
         return installed
 
     def package_available(self, package: str) -> bool:
+        if package in self._available_package_cache:
+            return self._available_package_cache[package]
         result = self.run(
             ["apt-cache", "--no-all-versions", "show", package],
             capture=True,
             check=False,
         )
-        return result.returncode == 0 and bool((result.stdout or "").strip())
+        available = result.returncode == 0 and bool((result.stdout or "").strip())
+        self._available_package_cache[package] = available
+        return available
 
     def planned_apt_packages(self) -> 'list[str]':
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
@@ -707,6 +723,7 @@ class Bootstrap:
             return True
         result: subprocess.CompletedProcess[str] | None = None
         self.apt_updated = False
+        self._available_package_cache.clear()
         for attempt in range(1, NETWORK_ATTEMPTS + 1):
             result = self.run(
                 ["apt-get", *self.apt_options(), "update"],
@@ -909,7 +926,21 @@ class Bootstrap:
         self.configure_vim()
         self.configure_tmux()
         self.install_oh_my_zsh()
+        self.configure_tool_paths()
         self.install_docker()
+
+    def configure_tool_paths(self) -> None:
+        """Make user-installed commands available in new Bash and Zsh sessions."""
+        body = (
+            'for _init_bin in /usr/local/bin "$HOME/.local/bin"; do\n'
+            '  case ":$PATH:" in *":$_init_bin:"*) ;; '
+            '*) export PATH="$_init_bin:$PATH" ;; esac\n'
+            'done\n'
+            'unset _init_bin'
+        )
+        for profile in (BASHRC, ZSHRC):
+            self.update_managed_block(profile, "# >>> init tool paths >>>",
+                                      "# <<< init tool paths <<<", body)
 
     @staticmethod
     def ubuntu_universe_enabled() -> bool:
@@ -1618,15 +1649,29 @@ class Bootstrap:
             "Python 2.7.18 legacy runtime and pip2 installed without changing system Python"
         )
 
+    def uses_managed_python(self) -> bool:
+        # Ubuntu 24.04's Python 3.12 is compatible. Keep both old Ubuntu and
+        # rolling/new distro interpreters separate from the CTF package stack.
+        return (self.distro["id"] == "kali" or self.ubuntu_before("24.04")
+                or (self.distro["id"] == "ubuntu" and not self.ubuntu_before("26.04")))
+
     def prepare_python_tools(self) -> bool:
-        if not self.ubuntu_before("24.04"):
+        if not self.uses_managed_python():
             return True
         if not self.install_uv():
             return False
         python = Path(self.system_python())
-        if not python.is_file():
+        ready = python.is_file() and self.run(
+            [str(python), "-c", "import sys, pip; assert sys.version_info[:2] == (3, 12)"],
+            check=False, capture=True, timeout=30,
+        ).returncode == 0
+        if not ready:
+            command = [self.uv_executable(), "venv", "--python", "3.12", "--seed"]
+            if python.parent.parent.exists():
+                self.warn("Repairing the managed Python 3.12 environment")
+                command.append("--clear")
             result = self.run(
-                [self.uv_executable(), "venv", "--python", "3.12", "--seed", str(python.parent.parent)],
+                command + [str(python.parent.parent)],
                 check=False, timeout=600,
             )
             if result.returncode != 0:
@@ -1672,8 +1717,6 @@ class Bootstrap:
                 list(commands), COMMAND_PROBE_ARGUMENTS[package]
             ) is None
         )
-        if self.ubuntu_before("24.04") and not (Path(python).parent / "ipython").is_file():
-            missing.append("ipython")
         if not missing:
             self.ok("Python tools: already installed")
             return
@@ -1685,7 +1728,7 @@ class Bootstrap:
         ]
         result = self.run(
             command + missing,
-            sudo=not self.ubuntu_before("24.04"),
+            sudo=not self.uses_managed_python(),
             check=False,
             env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
         )
@@ -1695,7 +1738,7 @@ class Bootstrap:
             for package in missing:
                 retry = self.run(
                     command + [package],
-                    sudo=not self.ubuntu_before("24.04"), check=False,
+                    sudo=not self.uses_managed_python(), check=False,
                     env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 )
                 if retry.returncode != 0:
@@ -1715,7 +1758,7 @@ class Bootstrap:
                 self.warn(f"Repairing broken Python command: {package}")
                 self.run(
                     command + ["--force-reinstall", "--no-deps", package],
-                    sudo=not self.ubuntu_before("24.04"), check=False,
+                    sudo=not self.uses_managed_python(), check=False,
                     env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 )
             broken = [
@@ -1728,6 +1771,22 @@ class Bootstrap:
             self.failures.append(
                 "Python CTF command verification failed: " + ", ".join(broken)
             )
+            return
+        imports = self.run([python, "-c", probe_code], check=False, capture=True, timeout=60)
+        failed_modules = set((imports.stdout or "").splitlines())
+        for package, module in PYTHON_IMPORT_PACKAGES.items():
+            if module in failed_modules:
+                self.warn(f"Repairing broken Python library: {package}")
+                self.run(
+                    command + ["--force-reinstall", "--no-deps", package],
+                    sudo=not self.uses_managed_python(), check=False,
+                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                )
+        if failed_modules:
+            imports = self.run([python, "-c", probe_code], check=False, capture=True, timeout=60)
+        if imports.returncode != 0 or (imports.stdout or "").strip():
+            self.failures.append("Python CTF library verification failed: " +
+                                 ((imports.stdout or imports.stderr or "interpreter probe failed").strip()))
             return
         self.ok(f"Python CTF tools installed for {python} and launch-verified")
 
@@ -1745,6 +1804,30 @@ class Bootstrap:
             content = f'#!/bin/sh\nexec {shlex.quote(pwn)} {name} "$@"\n'
             if not self.install_command_wrapper(Path("/usr/local/bin") / name, content):
                 self.failures.append(f"pwntools {name} command installation failed")
+
+    def repair_distro_python_commands(self) -> None:
+        """Keep APT Binwalk 2 on its own Capstone, separate from pip tools."""
+        if "binwalk" in self.compat_skips or self.find_usable_command(["binwalk"], ["--help"]):
+            return
+        script = Path("/usr/bin/binwalk")
+        try:
+            with script.open(encoding="utf-8") as handle:
+                if "python" not in handle.readline():
+                    return  # Rust Binwalk uses the regular native executable.
+        except (OSError, UnicodeError):
+            return
+        code = (
+            "import sys, runpy; "
+            "sys.path.append('/usr/lib/python3/dist-packages'); "
+            "runpy.run_path('/usr/bin/binwalk', run_name='__main__')"
+        )
+        command = ["/usr/bin/python3", "-I", "-S", "-c", code]
+        if not self.executable_usable(command[0], command[1:] + ["--help"]):
+            self.failures.append("APT Binwalk could not launch with distro Python dependencies")
+            return
+        content = "#!/bin/sh\nexec " + " ".join(shlex.quote(part) for part in command) + ' "$@"\n'
+        if not self.install_command_wrapper(Path("/usr/local/bin/binwalk"), content):
+            self.failures.append("APT Binwalk isolation wrapper installation failed")
 
     def install_ruby_tools(self) -> None:
         if not self.command_exists("gem"):
@@ -1768,8 +1851,11 @@ class Bootstrap:
         )
         self._extend_path()
         if result.returncode != 0:
-            self.failures.append("Ruby CTF tool installation failed")
-            return
+            self.warn("Ruby package batch failed; retrying broken tools independently")
+            for spec in missing:
+                gem = spec.split(":", 1)[0]
+                if not self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]):
+                    self.run(["gem", "install", "--no-document", spec], sudo=True, check=False)
         broken = [
             gem for gem in RUBY_GEMS
             if self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]) is None
@@ -1962,7 +2048,7 @@ class Bootstrap:
             )
 
     def system_python(self) -> str:
-        if self.ubuntu_before("24.04"):
+        if self.uses_managed_python():
             return str(HOME / ".local/share/init/python/bin/python3")
         return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
 
@@ -3485,7 +3571,7 @@ except gdb.error:
             dependencies = self.run(
                 [*pip_base, *GLIBC_AIO_DEPENDENCIES],
                 cwd=GLIBC_AIO_DIR,
-                sudo=not self.ubuntu_before("24.04"),
+                sudo=not self.uses_managed_python(),
                 check=False,
                 timeout=300,
                 env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
@@ -3498,7 +3584,7 @@ except gdb.error:
             editable = self.run(
                 [*pip_base, "--editable", "."],
                 cwd=GLIBC_AIO_DIR,
-                sudo=not self.ubuntu_before("24.04"),
+                sudo=not self.uses_managed_python(),
                 check=False,
                 timeout=300,
                 env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
@@ -3595,6 +3681,20 @@ except gdb.error:
             return False
 
     @staticmethod
+    def normalize_glibc_payload(target: Path) -> None:
+        # glibc-aio v2 preserves Debian multiarch directories. Expose relative
+        # links at the package root without moving or deleting downloaded files.
+        for name in ("x86_64-linux-gnu", "i386-linux-gnu"):
+            directory = target / name
+            if not (directory / "libc.so.6").is_file():
+                continue
+            for source in directory.iterdir():
+                destination = target / source.name
+                if source.is_dir() or destination.exists() or destination.is_symlink():
+                    continue
+                destination.symlink_to(Path(name) / source.name)
+
+    @staticmethod
     def glibc_package_target(package: str):
         libs_root = (GLIBC_AIO_DIR / "libs").resolve(strict=False)
         target = libs_root / package
@@ -3620,6 +3720,7 @@ except gdb.error:
                 self.failures.append(f"glibc index contains an unsafe package path: {package}")
                 return False
 
+            self.normalize_glibc_payload(target)
             if not self.glibc_package_payload_available(target):
                 if target.exists() or target.is_symlink():
                     self.info(f"glibc {version} {arch}: removing incomplete {package}")
@@ -3641,6 +3742,7 @@ except gdb.error:
                     network=True,
                     timeout=600,
                 )
+                self.normalize_glibc_payload(target)
                 if (
                     download.returncode != 0
                     or not self.glibc_package_payload_available(target)
@@ -3820,6 +3922,7 @@ except gdb.error:
         if self.prepare_python_tools():
             self.install_python_tools()
             self.install_checksec_fallback()
+            self.repair_distro_python_commands()
         self.install_ruby_tools()
         self.install_node_environment()
         self.install_go_environment()
@@ -3922,6 +4025,8 @@ except gdb.error:
                 ok_all = False
                 detail = "not found" if not found else "failed its launch probe"
                 message = f"verification failed: {label} {detail}"
+                if found and found in self._probe_errors:
+                    message += ": " + self._probe_errors[found]
                 if message not in self.failures:
                     self.failures.append(message)
                 self.error(message)
@@ -4238,8 +4343,8 @@ Usage:
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
 
-Ubuntu 18.04+ and current Kali are accepted. Older Ubuntu uses an isolated
-Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
+Ubuntu 18.04+ and current Kali are accepted. Kali, Ubuntu before 24.04 and
+Ubuntu 26.04+ use an isolated Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
 Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
 instead of installing current Pwndbg. System Python and glibc are not replaced.
 

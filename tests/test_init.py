@@ -124,14 +124,15 @@ class InstallerTests(unittest.TestCase):
     def test_legacy_python_environment_is_reused_without_sudo(self):
         self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
         self.bootstrap.install_uv = mock.Mock(return_value=True)
-        self.bootstrap.run = mock.Mock()
+        self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
         self.bootstrap.update_managed_block = mock.Mock()
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE, "HOME", Path(directory)), mock.patch.dict(MODULE.os.environ):
             python = Path(self.bootstrap.system_python())
             python.parent.mkdir(parents=True)
             python.touch()
             self.assertTrue(self.bootstrap.prepare_python_tools())
-            self.bootstrap.run.assert_not_called()
+            self.bootstrap.run.assert_called_once()
+            self.assertEqual(self.bootstrap.run.call_args[0][0][1], "-c")
             self.assertEqual(MODULE.os.environ["PATH"].split(":")[0], str(python.parent))
             self.assertEqual(self.bootstrap.update_managed_block.call_count, 2)
 
@@ -141,9 +142,10 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run = mock.Mock(side_effect=[
             subprocess.CompletedProcess([], 0, "capstone\n", ""),
             subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
         ])
         self.bootstrap.install_python_tools()
-        call = self.bootstrap.run.call_args
+        call = self.bootstrap.run.call_args_list[1]
         self.assertFalse(call[1]["sudo"])
         self.assertEqual(call[0][0][0], self.bootstrap.system_python())
 
@@ -361,10 +363,10 @@ class InstallerTests(unittest.TestCase):
     def test_python_install_uses_break_system_packages_globally(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
-        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
+        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result, subprocess.CompletedProcess([], 0, "", "")])
         self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
-        install_call = self.bootstrap.run.call_args
+        install_call = self.bootstrap.run.call_args_list[1]
         command = install_call[0][0]
         self.assertNotIn("--user", command)
         self.assertNotIn("--break-system-packages", command)
@@ -378,13 +380,14 @@ class InstallerTests(unittest.TestCase):
             with self.subTest(repaired=repaired):
                 bootstrap = MODULE.Bootstrap()
                 bootstrap.ubuntu_before = mock.Mock(return_value=False)
-                bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""))
-                bootstrap.find_usable_command = mock.Mock(side_effect=[
-                    "/bin/pwn", None, None,
-                    "/bin/pwn", None, None,
-                    "/bin/pwn", "/bin/ROPgadget" if repaired else None,
-                    "/bin/ropper" if repaired else None,
-                ])
+                broken = {"ROPgadget", "ropper"}
+                def run(command, **kwargs):
+                    if "--force-reinstall" in command and repaired:
+                        broken.discard(command[-1])
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                bootstrap.run = mock.Mock(side_effect=run)
+                bootstrap.find_usable_command = mock.Mock(
+                    side_effect=lambda names, args: None if names[0] in broken else "/bin/" + names[0])
                 bootstrap.install_python_tools()
                 repairs = [c[0][0] for c in bootstrap.run.call_args_list
                            if "--force-reinstall" in c[0][0]]
@@ -424,10 +427,10 @@ class InstallerTests(unittest.TestCase):
             ["python3", "-c"], 0, stdout="capstone\n", stderr=""
         )
         install_result = subprocess.CompletedProcess(["python3", "-m", "pip"], 0)
-        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result])
+        self.bootstrap.run = mock.Mock(side_effect=[probe_result, install_result, subprocess.CompletedProcess([], 0, "", "")])
         self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
         self.bootstrap.install_python_tools()
-        command = self.bootstrap.run.call_args[0][0]
+        command = self.bootstrap.run.call_args_list[1][0][0]
         self.assertIn("capstone", command)
         self.assertNotIn("ROPgadget", command)
         self.assertNotIn("ropper", command)
@@ -439,9 +442,10 @@ class InstallerTests(unittest.TestCase):
             subprocess.CompletedProcess([], 1),
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 0, "", ""),
         ])
         self.bootstrap.install_python_tools()
-        commands = [call[0][0] for call in self.bootstrap.run.call_args_list[1:]]
+        commands = [call[0][0] for call in self.bootstrap.run.call_args_list[1:-1]]
         self.assertEqual(commands[1][-1], "pwntools")
         self.assertEqual(commands[2][-1], "lief")
         self.assertTrue(all("--only-binary=lief" in command for command in commands))
@@ -721,6 +725,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_fastfetch = mock.Mock()
         self.bootstrap.configure_vim = mock.Mock()
         self.bootstrap.configure_tmux = mock.Mock()
+        self.bootstrap.configure_tool_paths = mock.Mock()
         self.bootstrap.install_oh_my_zsh = mock.Mock()
         self.bootstrap.install_docker = mock.Mock()
         self.bootstrap.install_system_foundation()
@@ -2098,7 +2103,8 @@ class InstallerTests(unittest.TestCase):
             "install_python2_legacy", "install_python_tools", "install_ruby_tools",
             "install_node_environment", "install_go_environment", "install_rust_environment",
             "install_radare2", "install_r2ghidra", "install_pwndbg_environment",
-            "install_helper_repositories",
+            "install_helper_repositories", "repair_distro_python_commands",
+            "install_checksec_fallback",
         ]
         calls = []
         for name in names:

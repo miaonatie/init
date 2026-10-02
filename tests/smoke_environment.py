@@ -4,10 +4,9 @@ Download one glibc revision per architecture; unit tests cover full index
 selection. Everything else uses the production install/verify paths unchanged.
 """
 import hashlib
-import os
 from pathlib import Path
-import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import init
@@ -30,6 +29,33 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def exercise_languages(b):
+    """Compile and execute tiny programs, not just --version probes."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        samples = [
+            ('hello.cpp', '#include <iostream>\nint main(){std::cout << "init-ok";}',
+             ['g++'], ['clang++']),
+            ('hello.go', 'package main\nimport "fmt"\nfunc main(){fmt.Print("init-ok")}', ['go', 'build']),
+            ('hello.rs', 'fn main(){print!("init-ok");}', [str(init.CARGO_HOME / 'bin/rustc')]),
+        ]
+        for name, source, *compilers in samples:
+            path, binary = root / name, root / 'program'
+            path.write_text(source)
+            for compiler in compilers:
+                b.run(compiler + ['-o', str(binary), str(path)], capture=True, timeout=120)
+                assert b.run([str(binary)], capture=True).stdout.strip() == 'init-ok', compiler
+        java = root / 'Hello.java'
+        java.write_text('public class Hello {public static void main(String[] a){System.out.print("init-ok");}}')
+        b.run(['javac', str(java)], capture=True, timeout=60)
+        assert b.run(['java', '-cp', str(root), 'Hello'], capture=True).stdout == 'init-ok'
+        assert b.run(['ruby', '-e', 'print "init-ok"'], capture=True).stdout == 'init-ok'
+        assert b.run(['python2', '-c', 'print("init-ok")'], capture=True).stdout.strip() == 'init-ok'
+        if 'node' not in b.compat_skips:
+            result = b.run_node_shell("nvm use --silent default >/dev/null\nnode -e 'process.stdout.write(\"init-ok\")'", capture=True)
+            assert result.returncode == 0 and result.stdout == 'init-ok', result
+
+
 def main():
     system_python = Path('/usr/bin/python3').resolve()
     system_digest = digest(system_python)
@@ -37,6 +63,11 @@ def main():
     assert b.install() == 0, b.failures
     assert Path('/usr/bin/python3').resolve() == system_python
     assert digest(system_python) == system_digest
+    # Installer PATH alone is insufficient: test clean interactive shell startup.
+    for shell in ('bash', 'zsh'):
+        b.run([shell, '-ic', 'command -v uv && command -v ROPgadget && command -v ropper'],
+              env={'PATH': '/usr/bin:/bin'}, capture=True, timeout=60)
+    exercise_languages(b)
     python = b.system_python()
     b.run([python, str(Path(__file__).with_name('smoke_pwn.py')), '--exercise'])
     # Exercise real repair with metadata intact (pip upgrade alone is a no-op).
