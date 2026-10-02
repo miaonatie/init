@@ -1860,7 +1860,8 @@ class Bootstrap:
             # 0.2.13 uses Ruby 2.6 syntax but permits installation on Ruby 2.5.
             # Explicit activation also repairs hosts with that newer gem present.
             code = 'gem "zsteg", "= 0.2.12"; load Gem.bin_path("zsteg", "zsteg", "0.2.12")'
-            wrapper = '#!/bin/sh\nexec /usr/bin/ruby -e ' + shlex.quote(code) + ' -- "$@"\n'
+            # A Ruby binstub preserves $0, which zsteg uses to select its CLI.
+            wrapper = '#!/usr/bin/ruby\n' + code + '\n'
             if not self.install_command_wrapper(Path("/usr/local/bin/zsteg"), wrapper):
                 self.failures.append("Ruby 2.5 zsteg wrapper installation failed")
         broken = [

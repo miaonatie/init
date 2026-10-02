@@ -135,7 +135,8 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('zsteg:0.2.12', self.b.run.call_args[0][0])
         wrapper = self.b.install_command_wrapper.call_args[0][1]
         self.assertIn('gem "zsteg", "= 0.2.12"', wrapper)
-        self.assertIn('"$@"', wrapper)
+        self.assertTrue(wrapper.startswith('#!/usr/bin/ruby\n'))
+        self.assertNotIn('ruby -e', wrapper)
         self.assertFalse(self.b.failures)
 
     def test_every_registered_probe_rejects_import_and_loader_errors(self):
