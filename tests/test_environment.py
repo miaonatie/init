@@ -37,6 +37,20 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(self.b.find_usable_command(['ROPgadget', 'ropgadget'], ['--help']),
                          '/bin/ropgadget')
 
+    def test_git_network_stalls_are_bounded_and_overrides_are_preserved(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+                subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
+            self.b.run(['git', 'fetch'], network=True, capture=True)
+            env = run.call_args[1]['env']
+            self.assertEqual(env['GIT_HTTP_LOW_SPEED_LIMIT'], '1')
+            self.assertEqual(env['GIT_HTTP_LOW_SPEED_TIME'], '30')
+            self.assertNotIn('GIT_HTTP_LOW_SPEED_TIME', os.environ)
+            self.b.run(['git', 'fetch'], network=True, capture=True,
+                       env={'GIT_HTTP_LOW_SPEED_TIME': '90'})
+            self.assertEqual(run.call_args[1]['env']['GIT_HTTP_LOW_SPEED_TIME'], '90')
+            self.b.run(['git', 'status'], capture=True)
+            self.assertNotIn('GIT_HTTP_LOW_SPEED_TIME', run.call_args[1]['env'])
+
     def test_pwndbg_packages_require_matching_gdb_python_abi(self):
         for marker, expected in [
             ('3.14\tlibpython3.14.so.1.0', True),

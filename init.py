@@ -568,6 +568,9 @@ class Bootstrap:
             overrides = [f"{key}={value}" for key, value in (env or {}).items()]
             final = ["sudo", "env", *overrides, *final] if overrides else ["sudo", *final]
         merged_env = os.environ.copy()
+        if network and Path(command[0]).name == "git":
+            merged_env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            merged_env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "30")
         if env:
             merged_env.update(env)
         attempts = NETWORK_ATTEMPTS if network else 1
@@ -626,12 +629,15 @@ class Bootstrap:
 
     @staticmethod
     def apt_env() -> 'dict[str, str]':
-        return {"DEBIAN_FRONTEND": "noninteractive", "NEEDRESTART_MODE": "a"}
+        return {"DEBIAN_FRONTEND": "noninteractive", "NEEDRESTART_MODE": "a", "LC_ALL": "C"}
 
     @staticmethod
     def apt_options() -> 'list[str]':
         return [
             "-o", "Acquire::Retries=1",
+            "-o", "Acquire::http::Timeout=30",
+            "-o", "Acquire::https::Timeout=30",
+            "-o", "DPkg::Lock::Timeout=60",
             "-o", "Dpkg::Options::=--force-confold",
         ]
 
