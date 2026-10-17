@@ -15,6 +15,83 @@ class EnvironmentTests(unittest.TestCase):
     def setUp(self):
         self.b = init.Bootstrap()
 
+    def test_check_and_repair_do_not_run_full_installation(self):
+        for args, method in [(['--check'], 'check'), (['--repair', 'pwndbg'], 'repair_pwndbg')]:
+            with self.subTest(args=args), mock.patch.object(init, 'Bootstrap') as constructor:
+                b = constructor.return_value
+                getattr(b, method).return_value = 0
+                self.assertEqual(init.main(args), 0)
+                getattr(b, method).assert_called_once_with()
+                b.install.assert_not_called()
+                b.preflight.assert_not_called()
+
+    def test_check_propagates_verification_failures_without_sudo(self):
+        self.b.verify = mock.Mock(side_effect=lambda: self.b.failures.append('broken tool'))
+        self.b.require_sudo = mock.Mock()
+        self.assertEqual(self.b.check(), 1)
+        self.b.require_sudo.assert_not_called()
+
+    def test_command_aliases_try_next_name_after_broken_launcher(self):
+        self.b.find_command = mock.Mock(side_effect=['/bin/ROPgadget', '/bin/ropgadget'])
+        self.b.executable_usable = mock.Mock(side_effect=[False, True])
+        self.assertEqual(self.b.find_usable_command(['ROPgadget', 'ropgadget'], ['--help']),
+                         '/bin/ropgadget')
+
+    def test_pwndbg_packages_require_matching_gdb_python_abi(self):
+        for marker, expected in [
+            ('3.14\tlibpython3.14.so.1.0', True),
+            ('3.13\tlibpython3.13.so.1.0', False),
+            ('3.14\tlibpython3.14-custom.so', False),
+            ('', False),
+        ]:
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as directory:
+                b = init.Bootstrap()
+                root = Path(directory)
+                gdbinit = root / 'share/pwndbg/gdbinit.py'
+                python = root / 'bin/python'
+                gdbinit.parent.mkdir(parents=True)
+                python.parent.mkdir()
+                gdbinit.touch()
+                python.touch(mode=0o755)
+                b.pwndbg_gdbinit_path = mock.Mock(return_value=gdbinit)
+                b.pwndbg_tool_python = mock.Mock(return_value=python)
+                b.gdb_python_abi = mock.Mock(return_value=('3.14', 'libpython3.14.so.1.0'))
+                output = ('INIT_PWNDBG_VERSION=' + init.PWNDBG_VERSION + '\n'
+                          'INIT_R2PIPE_OK=' + init.R2PIPE_VERSION + '\n'
+                          'INIT_PYTHON_ABI=' + marker + '\n')
+                b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, output, ''))
+                self.assertEqual(b.pwndbg_uv_packages_available(), expected)
+                self.assertEqual(b.pwndbg_uv_packages_available(), expected)
+                b.run.assert_called_once()
+
+    def test_pwndbg_repair_uses_pinned_source_and_invalidates_decompiler_probe(self):
+        self.b.install_uv = mock.Mock(return_value=True)
+        self.b.uv_executable = mock.Mock(return_value='/bin/uv')
+        self.b.pwndbg_uv_packages_available = mock.Mock(side_effect=[False, True])
+        self.b.gdb_python_install_target = mock.Mock(return_value='/usr/bin/python3.14')
+        self.b.pwndbg_tool_python = mock.Mock(return_value=Path('/tool/bin/python'))
+        self.b.pwndbg_gdbinit_path = mock.Mock(return_value=None)
+        self.b._pwndbg_probe_cache = subprocess.CompletedProcess([], 1, '', 'old failure')
+        self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        self.assertTrue(self.b.install_pwndbg_uv())
+        command = self.b.run.call_args[0][0]
+        self.assertIn('--reinstall', command)
+        self.assertIn(init.PWNDBG_UV_SPEC, command)
+        self.assertIn('/usr/bin/python3.14', command)
+        self.assertIsNone(self.b._pwndbg_probe_cache)
+
+    def test_managed_python_path_stays_unique_on_repeat(self):
+        self.b.distro = {'id': 'kali'}
+        self.b.install_uv = mock.Mock(return_value=True)
+        self.b.update_managed_block = mock.Mock()
+        self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        with mock.patch.object(Path, 'is_file', return_value=True), mock.patch.dict(os.environ):
+            python_bin = str(Path(self.b.system_python()).parent)
+            os.environ['PATH'] = python_bin + os.pathsep + '/usr/bin'
+            self.assertTrue(self.b.prepare_python_tools())
+            self.assertTrue(self.b.prepare_python_tools())
+            self.assertEqual(os.environ['PATH'].split(os.pathsep).count(python_bin), 1)
+
     def test_python_interpreter_matrix(self):
         for distro, version, isolated in [('ubuntu', '18.04', True), ('ubuntu', '20.04', True),
                                          ('ubuntu', '22.04', True), ('ubuntu', '24.04', True),

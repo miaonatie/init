@@ -85,6 +85,9 @@ def main():
     repeat = CIEnvironment()
     assert repeat.install() == 0, repeat.failures
     assert before == {str(p): digest(p) for p in profiles}, 'configuration changed on repeat'
+    check = CIEnvironment()
+    assert check.check() == 0, check.failures
+    assert before == {str(p): digest(p) for p in profiles}, 'configuration changed during check'
     assert digest(system_python) == system_digest
     print('PASS: full installation, verification, CLI repair and repeat installation')
     print('Compatibility skips:', repeat.skipped)

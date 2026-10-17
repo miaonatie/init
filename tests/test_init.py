@@ -1346,11 +1346,11 @@ class InstallerTests(unittest.TestCase):
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv(force=True))
         command = self.bootstrap.run.call_args[0][0]
-        self.assertEqual(command[1:3], ["tool", "upgrade"])
+        self.assertEqual(command[1:3], ["tool", "install"])
         self.assertNotIn("--upgrade", command)
         self.assertIn("--reinstall", command)
-        self.assertIn(MODULE.PWNDBG_TOOL_NAME, command)
-        self.assertNotIn(MODULE.PWNDBG_UV_SPEC, command)
+        self.assertIn("--force", command)
+        self.assertIn(MODULE.PWNDBG_UV_SPEC, command)
         self.assertNotIn("network", self.bootstrap.run.call_args[1])
 
     def test_broken_existing_uv_pwndbg_reinstalls_without_upgrading(self):
@@ -1423,6 +1423,7 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(self.bootstrap.gdb_python_install_target(), "3.13")
 
     def test_pwndbg_uv_package_probe_uses_tool_python_and_imports_r2pipe(self):
+        self.bootstrap.gdb_python_abi = mock.Mock(return_value=("3.13", "libpython3.13.so.1.0"))
         with tempfile.TemporaryDirectory() as directory:
             tool = Path(directory) / "pwndbg"
             gdbinit = tool / "share" / "pwndbg" / "gdbinit.py"
@@ -1439,6 +1440,7 @@ class InstallerTests(unittest.TestCase):
                     stdout=(
                         f"INIT_PWNDBG_VERSION={MODULE.PWNDBG_VERSION}\n"
                         f"INIT_R2PIPE_OK={MODULE.R2PIPE_VERSION}\n"
+                        "INIT_PYTHON_ABI=3.13\tlibpython3.13.so.1.0\n"
                     ),
                     stderr="",
                 )

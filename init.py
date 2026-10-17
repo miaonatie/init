@@ -1680,7 +1680,10 @@ class Bootstrap:
         body = f'export PATH={shlex.quote(str(python.parent))}:"$PATH"'
         for profile in (BASHRC, ZSHRC):
             self.update_managed_block(profile, "# >>> init Python tools >>>", "# <<< init Python tools <<<", body)
-        os.environ["PATH"] = str(python.parent) + os.pathsep + os.environ.get("PATH", "")
+        paths = os.environ.get("PATH", "").split(os.pathsep)
+        os.environ["PATH"] = os.pathsep.join([str(python.parent)] + [p for p in paths if p != str(python.parent)])
+        if not ready:
+            self._glibc_runtime_cache = None
         self.ok(f"Python CTF tools use {python}; system Python is preserved")
         return True
 
@@ -1701,6 +1704,7 @@ class Bootstrap:
             [python, "-c", probe_code],
             check=False,
             capture=True,
+            timeout=60,
         )
         if probe.returncode == 0:
             missing_modules = set((probe.stdout or "").splitlines())
@@ -1729,6 +1733,7 @@ class Bootstrap:
             command + missing,
             sudo=not self.uses_managed_python(),
             check=False,
+            timeout=600,
             env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
         )
         if result.returncode != 0:
@@ -1738,6 +1743,7 @@ class Bootstrap:
                 retry = self.run(
                     command + [package],
                     sudo=not self.uses_managed_python(), check=False,
+                    timeout=300,
                     env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 )
                 if retry.returncode != 0:
@@ -1758,6 +1764,7 @@ class Bootstrap:
                 self.run(
                     command + ["--force-reinstall", "--no-deps", package],
                     sudo=not self.uses_managed_python(), check=False,
+                    timeout=300,
                     env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 )
             broken = [
@@ -1779,6 +1786,7 @@ class Bootstrap:
                 self.run(
                     command + ["--force-reinstall", "--no-deps", package],
                     sudo=not self.uses_managed_python(), check=False,
+                    timeout=300,
                     env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
                 )
         if failed_modules:
@@ -1848,6 +1856,7 @@ class Bootstrap:
             ["gem", "install", "--no-document", *missing],
             sudo=True,
             check=False,
+            timeout=600,
         )
         self._extend_path()
         if result.returncode != 0:
@@ -1855,7 +1864,7 @@ class Bootstrap:
             for spec in missing:
                 gem = spec.split(":", 1)[0]
                 if not self.find_usable_command([gem], COMMAND_PROBE_ARGUMENTS[gem]):
-                    self.run(["gem", "install", "--no-document", spec], sudo=True, check=False)
+                    self.run(["gem", "install", "--no-document", spec], sudo=True, check=False, timeout=300)
         if self.ubuntu_before("20.04") and "zsteg:0.2.12" in missing:
             # 0.2.13 uses Ruby 2.6 syntax but permits installation on Ruby 2.5.
             # Explicit activation also repairs hosts with that newer gem present.
@@ -1967,6 +1976,8 @@ class Bootstrap:
             self.failures.append("radare2 official source build/install failed")
             return False
 
+        self._r2ghidra_available_cache = None
+        self._pwndbg_probe_cache = None
         installed = self.radare2_version()
         if (
             installed is None
@@ -2253,9 +2264,11 @@ class Bootstrap:
         probe = self.run(
             [
                 str(python), "-c", (
-                    "import r2pipe; from importlib.metadata import version; "
+                    "import r2pipe, sysconfig; from importlib.metadata import version; "
                     "print('INIT_PWNDBG_VERSION=' + version('pwndbg')); "
-                    "print('INIT_R2PIPE_OK=' + version('r2pipe'))"
+                    "print('INIT_R2PIPE_OK=' + version('r2pipe')); "
+                    "print('INIT_PYTHON_ABI=' + str(sysconfig.get_config_var('VERSION')) "
+                    "+ '\\t' + str(sysconfig.get_config_var('INSTSONAME')))"
                 ),
             ],
             check=False,
@@ -2270,10 +2283,13 @@ class Bootstrap:
             if version_match is not None
             else ()
         )
+        abi = self.gdb_python_abi()
         self._pwndbg_uv_cache = (
             probe.returncode == 0
             and detected_version == expected_version
             and f"init_r2pipe_ok={R2PIPE_VERSION}" in output
+            and abi is not None
+            and f"init_python_abi={abi[0]}\t{abi[1]}".lower() in output.splitlines()
             and "traceback" not in output
         )
         return self._pwndbg_uv_cache
@@ -2302,26 +2318,19 @@ class Bootstrap:
             return False
         executable = self.uv_executable()
         assert executable is not None
-        if force and packages_available:
-            # This preserves the tool receipt (including r2pipe) while changing
-            # the interpreter used to build the environment.
-            command = [
-                executable, "tool", "upgrade",
-                "--python", python_target,
-                "--reinstall", PWNDBG_TOOL_NAME,
-            ]
-        else:
-            command = [
-                executable, "tool", "install",
-                "--python", python_target,
-                "--with", f"r2pipe=={R2PIPE_VERSION}",
-            ]
-            existing_gdbinit = self.pwndbg_gdbinit_path()
-            if self.update_existing:
-                command.extend(["--upgrade", "--reinstall"])
-            elif existing_gdbinit is not None and existing_gdbinit.is_file():
-                command.append("--reinstall")
-            command.append(PWNDBG_UV_SPEC)
+        command = [
+            executable, "tool", "install", "--force",
+            "--python", python_target,
+            "--with", f"r2pipe=={R2PIPE_VERSION}",
+        ]
+        existing_python = self.pwndbg_tool_python()
+        existing_gdbinit = self.pwndbg_gdbinit_path()
+        if (force or self.update_existing or existing_python is not None
+                or (existing_gdbinit is not None and existing_gdbinit.is_file())):
+            command.append("--reinstall")
+        if self.update_existing:
+            command.append("--upgrade")
+        command.append(PWNDBG_UV_SPEC)
         command.append("--no-progress")
         self.info(
             f"installing Pwndbg {PWNDBG_VERSION} for system GDB "
@@ -2339,6 +2348,7 @@ class Bootstrap:
         self._pwndbg_backend_cache = None
         self._pwndbg_import_probe_cache = None
         self._pwndbg_launcher_probe_cache = None
+        self._pwndbg_probe_cache = None
         self._r2pipe_available_cache = None
         if result.returncode != 0:
             details = [
@@ -3949,12 +3959,28 @@ except gdb.error:
         return None
 
     def find_usable_command(self, names: 'list[str]', arguments: 'list[str]') -> 'str | None':
-        found = self.find_command(names)
-        if found and self.executable_usable(found, arguments):
-            return found
+        for name in names:
+            found = self.find_command([name])
+            if found and self.executable_usable(found, arguments):
+                return found
         return None
 
     def verify(self) -> bool:
+        # A fresh --check process must use the same compatibility rules as install.
+        if self.ubuntu_before("24.04"):
+            for package in [*DAILY_APT, *CTF_APT]:
+                if not self.package_installed(package) and not self.package_available(package):
+                    self.skip_compat(package, "unavailable in this Ubuntu release's APT repositories")
+            if not self.package_available("fastfetch"):
+                self.skip_compat("fastfetch", "no compatible distro package")
+        if self.ubuntu_before("22.04"):
+            if not self.r2ghidra_available():
+                self.skip_compat("r2ghidra", "requires a newer compiler")
+            abi = self.gdb_python_abi()
+            if abi is None or tuple(map(int, abi[0].split("."))) < (3, 10):
+                self.skip_compat("pwndbg", "requires a newer system GDB/Python")
+        if self.ubuntu_before("20.04"):
+            self.skip_compat("node", "requires a newer system glibc")
         checks = [
             ("python3", ["python3"]),
             ("ipython", ["ipython"]),
@@ -4021,16 +4047,14 @@ except gdb.error:
             package = {"fd": "fd-find", "neowofetch": "hyfetch"}.get(label, label)
             if package in self.compat_skips:
                 continue
-            found = self.find_command(names)
             probe_arguments = COMMAND_PROBE_ARGUMENTS.get(label)
-            usable = bool(found) and (
-                probe_arguments is None
-                or self.executable_usable(found, probe_arguments)
-            )
-            if found and usable:
+            found = (self.find_usable_command(names, probe_arguments)
+                     if probe_arguments is not None else self.find_command(names))
+            if found:
                 self.ok(f"{label}: {found}")
             else:
                 ok_all = False
+                found = self.find_command(names)
                 detail = "not found" if not found else "failed its launch probe"
                 message = f"verification failed: {label} {detail}"
                 if found and found in self._probe_errors:
@@ -4148,6 +4172,7 @@ except gdb.error:
             [python, "-c", "; ".join(f"import {module}" for module in PYTHON_IMPORTS)],
             check=False,
             capture=True,
+            timeout=60,
         )
         if imports.returncode == 0:
             self.ok("Python CTF libraries")
@@ -4319,7 +4344,7 @@ except gdb.error:
                 print(f"  - {item}")
             self.error(f"completed with {len(self.failures)} failure(s) in {elapsed}")
             return 1
-        self.ok(f"CTF environment installation and verification completed in {elapsed}")
+        self.ok(f"CTF environment ready in {elapsed}")
         return 0
 
     def install(self) -> int:
@@ -4330,6 +4355,16 @@ except gdb.error:
         self.run_stage("System foundation", self.install_system_foundation)
         self.run_stage("CTF toolchain", self.install_ctf_toolchain)
         self.run_stage("Verification", self.verify)
+        return self.summary()
+
+    def check(self) -> int:
+        print(self.colorize("36;1", f"init {VERSION} | Check"))
+        self.verify()
+        return self.summary()
+
+    def repair_pwndbg(self) -> int:
+        print(self.colorize("36;1", f"init {VERSION} | Repair Pwndbg"))
+        self.install_pwndbg_environment()
         return self.summary()
 
     def remove_portable_pwndbg_only(self) -> int:
@@ -4347,6 +4382,9 @@ def help_text() -> str:
 Usage:
   python3 init.py          Initialize and verify the CTF environment
   python3 init.py --update Update managed tools, then verify everything
+  python3 init.py --check  Check the environment without installing tools
+  python3 init.py --repair pwndbg
+                           Repair and verify the debugger environment only
   python3 init.py --remove-portable-pwndbg
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
@@ -4366,12 +4404,17 @@ def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--update"], ["--remove-portable-pwndbg"]):
+    if argv not in ([], ["--update"], ["--check"], ["--repair", "pwndbg"],
+                    ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
     bootstrap = Bootstrap(update_existing=argv == ["--update"])
     try:
+        if argv == ["--check"]:
+            return bootstrap.check()
+        if argv == ["--repair", "pwndbg"]:
+            return bootstrap.repair_pwndbg()
         if argv == ["--remove-portable-pwndbg"]:
             return bootstrap.remove_portable_pwndbg_only()
         return bootstrap.install()
