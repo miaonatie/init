@@ -67,21 +67,12 @@ class InstallerTests(unittest.TestCase):
     def test_version_has_single_source_of_truth(self):
         self.assertEqual(MODULE.VERSION, (ROOT / "VERSION").read_text(encoding="utf-8").strip())
 
-    def test_update_flag_selects_explicit_update_mode(self):
-        bootstrap = mock.Mock()
-        bootstrap.install.return_value = 0
-        with mock.patch.object(MODULE, "Bootstrap", return_value=bootstrap) as constructor:
-            self.assertEqual(MODULE.main(["--update"]), 0)
-        constructor.assert_called_once_with(update_existing=True)
-        bootstrap.install.assert_called_once_with()
-        self.assertIn("--update", MODULE.help_text())
-
     def test_portable_pwndbg_cleanup_has_an_explicit_cli_mode(self):
         bootstrap = mock.Mock()
         bootstrap.remove_portable_pwndbg_only.return_value = 0
         with mock.patch.object(MODULE, "Bootstrap", return_value=bootstrap) as constructor:
             self.assertEqual(MODULE.main(["--remove-portable-pwndbg"]), 0)
-        constructor.assert_called_once_with(update_existing=False)
+        constructor.assert_called_once_with()
         bootstrap.remove_portable_pwndbg_only.assert_called_once_with()
         bootstrap.install.assert_not_called()
         self.assertIn("--remove-portable-pwndbg", MODULE.help_text())
@@ -976,14 +967,13 @@ class InstallerTests(unittest.TestCase):
                 self.assertIn('[ -f "$HOME/.cargo/env" ]', text)
 
     def test_node_install_uses_lts_and_corepack_managed_package_managers(self):
-        self.bootstrap.update_existing = True
         self.bootstrap.install_nvm = mock.Mock(return_value=True)
         self.bootstrap.configure_node_shells = mock.Mock(return_value=True)
         self.bootstrap.run_node_shell = mock.Mock(
             return_value=subprocess.CompletedProcess(["bash"], 0)
         )
-        self.bootstrap.node_runtime_available = mock.Mock(return_value=True)
-        self.bootstrap.node_environment_available = mock.Mock(return_value=True)
+        self.bootstrap.node_runtime_available = mock.Mock(return_value=False)
+        self.bootstrap.node_environment_available = mock.Mock(side_effect=[False, True])
 
         self.bootstrap.install_node_environment()
 
@@ -1078,7 +1068,6 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(call[1]["env"]["PROFILE"], "/dev/null")
 
     def test_existing_rustup_updates_stable_and_standard_components(self):
-        self.bootstrap.update_existing = True
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             cargo_home = root / ".cargo"
@@ -1090,7 +1079,8 @@ class InstallerTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(["rustup"], 0)
             )
             self.bootstrap.configure_rust_shells = mock.Mock(return_value=True)
-            self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
+            self.bootstrap.rust_environment_available = mock.Mock(side_effect=[False, True])
+            self.bootstrap.rust_runtime_available = mock.Mock(return_value=False)
             with mock.patch.object(MODULE, "CARGO_HOME", cargo_home), mock.patch.object(MODULE, "RUSTUP_HOME", rustup_home):
                 self.bootstrap.install_rust_environment()
 
@@ -1925,7 +1915,6 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(self.bootstrap.failures, [])
 
     def test_glibc_all_in_one_v2_repairs_package_even_when_index_is_ready(self):
-        self.bootstrap.update_existing = True
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "glibc-all-in-one"
             destination.mkdir()
@@ -1935,7 +1924,8 @@ class InstallerTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(["pip"], 0)
             )
             self.bootstrap.install_command_wrapper = mock.Mock(return_value=True)
-            self.bootstrap.glibc_aio_runtime_available = mock.Mock(return_value=True)
+            self.bootstrap.glibc_aio_runtime_available = mock.Mock(side_effect=[False, True])
+            self.bootstrap.glibc_aio_index_available = mock.Mock(side_effect=[False, True])
             self.bootstrap.configure_glibc_library = mock.Mock(return_value=True)
             with mock.patch.object(MODULE, "GLIBC_AIO_DIR", destination):
                 self.bootstrap.install_glibc_all_in_one()

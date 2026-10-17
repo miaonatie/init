@@ -331,7 +331,7 @@ COMMAND_PROBE_ARGUMENTS["pwntools"] = ["--help"]
 
 
 class Bootstrap:
-    def __init__(self, *, update_existing: bool = False) -> None:
+    def __init__(self) -> None:
         self.failures: list[str] = []
         self.skipped: list[str] = []
         self.compat_skips = set()
@@ -339,7 +339,6 @@ class Bootstrap:
         self.step = 0
         self.step_total = 4
         self.apt_updated = False
-        self.update_existing = update_existing
         self._package_cache: dict[str, bool] = {}
         self._available_package_cache: dict[str, bool] = {}
         self._probe_errors: dict[str, str] = {}
@@ -1323,7 +1322,7 @@ class Bootstrap:
             "Oh My Zsh",
             OH_MY_ZSH_URL,
             OH_MY_ZSH_DIR,
-            update=self.update_existing,
+            update=False,
         ):
             return
         if not self.restore_missing_git_file(OH_MY_ZSH_DIR, "oh-my-zsh.sh"):
@@ -1336,7 +1335,7 @@ class Bootstrap:
                 name,
                 url,
                 custom_dir / name,
-                update=self.update_existing,
+                update=False,
             ):
                 return
         plugin_files = (
@@ -2331,8 +2330,7 @@ class Bootstrap:
             return False
         packages_available = self.pwndbg_uv_packages_available()
         if (
-            not self.update_existing
-            and not force
+            not force
             and packages_available
             and self.find_command(["pwndbg"]) is not None
             and self.pwndbg_launcher_available()
@@ -2358,11 +2356,9 @@ class Bootstrap:
         ]
         existing_python = self.pwndbg_tool_python()
         existing_gdbinit = self.pwndbg_gdbinit_path()
-        if (force or self.update_existing or existing_python is not None
+        if (force or existing_python is not None
                 or (existing_gdbinit is not None and existing_gdbinit.is_file())):
             command.append("--reinstall")
-        if self.update_existing:
-            command.append("--upgrade")
         command.append(PWNDBG_UV_SPEC)
         command.append("--no-progress")
         self.info(
@@ -3319,7 +3315,7 @@ except gdb.error:
             return
         if not self.install_nvm() or not self.configure_node_shells():
             return
-        if not self.update_existing and self.node_environment_available():
+        if self.node_environment_available():
             self.ok("Node.js LTS, npm, Corepack, pnpm and Yarn: already configured")
             return
         runtime_ready = self.node_runtime_available()
@@ -3327,7 +3323,7 @@ except gdb.error:
             "nvm install --lts\n"
             "nvm alias default 'lts/*'\n"
             "nvm use --lts >/dev/null\n"
-            if self.update_existing or not runtime_ready
+            if not runtime_ready
             else "nvm use --silent default >/dev/null\n"
         )
         commands = (
@@ -3495,7 +3491,7 @@ except gdb.error:
         if rustup.exists():
             if not self.configure_rust_shells():
                 return
-            if not self.update_existing and self.rust_environment_available():
+            if self.rust_environment_available():
                 self.ok("Rust stable, Cargo, rustfmt and Clippy: already configured")
                 return
         if not rustup.exists():
@@ -3532,8 +3528,8 @@ except gdb.error:
                     except OSError:
                         pass
 
-        runtime_ready = not self.update_existing and self.rust_runtime_available()
-        if not self.update_existing and runtime_ready:
+        runtime_ready = self.rust_runtime_available()
+        if runtime_ready:
             self.info("repairing missing Rust standard components")
             commands = (
                 [
@@ -3580,7 +3576,7 @@ except gdb.error:
 
     def install_helper_repositories(self) -> None:
         for name, url in HELPER_REPOS.items():
-            if not self.clone_or_update(name, url, update=self.update_existing):
+            if not self.clone_or_update(name, url, update=False):
                 continue
             if name == "glibc-all-in-one":
                 self.install_glibc_all_in_one()
@@ -3613,7 +3609,7 @@ except gdb.error:
             )
             return
 
-        if self.update_existing or not runtime_ready:
+        if not runtime_ready:
             python = self.system_python()
             pip_base = [
                 python, "-m", "pip", "install",
@@ -3661,7 +3657,7 @@ except gdb.error:
                 )
                 return
 
-        if self.update_existing or not index_ready:
+        if not index_ready:
             self.info("glibc-all-in-one: updating the libc package index")
             update_list = self.run(
                 [str(GLIBC_AIO_COMMAND), "mirror", "update"],
@@ -4392,8 +4388,7 @@ except gdb.error:
 
     def install(self) -> int:
         print(self.colorize("36;1", f"init {VERSION}"))
-        mode = "update existing tools" if self.update_existing else "fast idempotent install"
-        print(f"Target: CTF workstation | Mode: non-interactive, {mode}")
+        print("Target: CTF workstation | Mode: non-interactive, fast idempotent install")
         self.run_stage("Environment check", self.preflight)
         self.run_stage("System foundation", self.install_system_foundation)
         self.run_stage("CTF toolchain", self.install_ctf_toolchain)
@@ -4419,7 +4414,6 @@ def help_text() -> str:
 
 Usage:
   python3 init.py          Initialize and verify the CTF environment
-  python3 init.py --update Update managed tools, then verify everything
   python3 init.py --check  Check the environment without installing tools
   python3 init.py --remove-portable-pwndbg
                            Remove the legacy portable Pwndbg integration only
@@ -4429,9 +4423,9 @@ Ubuntu 18.04+ and current Kali use an isolated Python 3.12 for CTF tools. Missin
 Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
 instead of installing current Pwndbg. System Python and glibc are not replaced.
 
-The default operation skips usable tools. --update refreshes managed language
-toolchains and repositories. The default operation also migrates the legacy
-portable Pwndbg installation to system GDB plus uv. Neither install mode runs
+The default operation skips usable tools and automatically repairs broken ones.
+After git pull, run this script again to apply changes. It also migrates the legacy
+portable Pwndbg installation to system GDB plus uv. The installer never runs
 full-upgrade or autoremove.
 """.strip()
 
@@ -4440,12 +4434,12 @@ def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--update"], ["--check"],
+    if argv not in ([], ["--check"],
                     ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
-    bootstrap = Bootstrap(update_existing=argv == ["--update"])
+    bootstrap = Bootstrap()
     try:
         if argv == ["--check"]:
             return bootstrap.check()
