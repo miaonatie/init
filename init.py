@@ -568,11 +568,18 @@ class Bootstrap:
             overrides = [f"{key}={value}" for key, value in (env or {}).items()]
             final = ["sudo", "env", *overrides, *final] if overrides else ["sudo", *final]
         merged_env = os.environ.copy()
-        if network and Path(command[0]).name == "git":
+        git_network = network and Path(command[0]).name == "git"
+        if git_network:
             merged_env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1")
             merged_env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "30")
         if env:
             merged_env.update(env)
+        process_timeout = timeout
+        if git_network and timeout is not None:
+            # Git starts transport helpers. Kill the whole process group on a
+            # timeout so an abandoned helper cannot outlive an installer retry.
+            final = ["timeout", "--kill-after=5", str(timeout), *final]
+            process_timeout = timeout + 10
         attempts = NETWORK_ATTEMPTS if network else 1
         result: subprocess.CompletedProcess[str] | None = None
         for attempt in range(1, attempts + 1):
@@ -588,7 +595,7 @@ class Bootstrap:
                     errors="replace",
                     stdout=subprocess.PIPE if capture else None,
                     stderr=subprocess.PIPE if capture else None,
-                    timeout=timeout,
+                    timeout=process_timeout,
                 )
             except OSError as exc:
                 # which() can find a file whose shebang interpreter is missing,
@@ -603,6 +610,8 @@ class Bootstrap:
                 timeout_message = f"command timed out after {exc.timeout:g}s"
                 stderr = f"{stderr.rstrip()}\n{timeout_message}" if stderr else timeout_message
                 result = subprocess.CompletedProcess(final, 124, stdout, stderr)
+            if git_network and timeout is not None and result.returncode == 124:
+                result.stderr = (result.stderr or "").rstrip() + f"\ncommand timed out after {timeout:g}s"
             if result.returncode == 0:
                 return result
             if attempt < attempts:

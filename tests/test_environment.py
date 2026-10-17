@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -50,6 +51,24 @@ class EnvironmentTests(unittest.TestCase):
             self.assertEqual(run.call_args[1]['env']['GIT_HTTP_LOW_SPEED_TIME'], '90')
             self.b.run(['git', 'status'], capture=True)
             self.assertNotIn('GIT_HTTP_LOW_SPEED_TIME', run.call_args[1]['env'])
+
+    def test_git_timeout_stops_transport_children_before_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            git = Path(directory) / 'git'
+            git.write_text('#!/bin/sh\nsleep 30 &\necho $!\nwait\n')
+            git.chmod(0o755)
+            started = time.monotonic()
+            with mock.patch.object(init, 'NETWORK_ATTEMPTS', 1):
+                result = self.b.run([str(git)], network=True, capture=True, timeout=0.2, check=False)
+            self.assertEqual(result.returncode, 124)
+            self.assertIn('timed out', result.stderr)
+            self.assertLess(time.monotonic() - started, 3)
+            child = Path('/proc') / result.stdout.strip() / 'stat'
+            try:
+                state = child.read_text().rsplit(')', 1)[1].split()[0]
+            except FileNotFoundError:
+                state = 'X'
+            self.assertIn(state, {'Z', 'X'}, 'Git transport child survived timeout')
 
     def test_pwndbg_packages_require_matching_gdb_python_abi(self):
         for marker, expected in [
