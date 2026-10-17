@@ -1190,7 +1190,7 @@ class Bootstrap:
                     env=env,
                     check=False,
                     network=True,
-                    timeout=300,
+                    timeout=60,
                 )
                 if result.returncode != 0:
                     self.warn(f"{name}: update failed; using the existing checkout")
@@ -2309,6 +2309,7 @@ class Bootstrap:
             and not force
             and packages_available
             and self.find_command(["pwndbg"]) is not None
+            and self.pwndbg_launcher_available()
         ):
             self.ok(
                 f"Pwndbg {PWNDBG_VERSION} and r2pipe: already installed "

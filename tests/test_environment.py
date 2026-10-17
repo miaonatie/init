@@ -94,6 +94,19 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn('/usr/bin/python3.14', command)
         self.assertIsNone(self.b._pwndbg_probe_cache)
 
+    def test_broken_pwndbg_launcher_is_repaired_even_when_packages_are_healthy(self):
+        self.b.install_uv = mock.Mock(return_value=True)
+        self.b.uv_executable = mock.Mock(return_value='/bin/uv')
+        self.b.pwndbg_uv_packages_available = mock.Mock(return_value=True)
+        self.b.find_command = mock.Mock(return_value='/tool/bin/pwndbg')
+        self.b.pwndbg_launcher_available = mock.Mock(return_value=False)
+        self.b.gdb_python_install_target = mock.Mock(return_value='/usr/bin/python3.14')
+        self.b.pwndbg_tool_python = mock.Mock(return_value=Path('/tool/bin/python'))
+        self.b.pwndbg_gdbinit_path = mock.Mock(return_value=None)
+        self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
+        self.assertTrue(self.b.install_pwndbg_uv())
+        self.assertIn('--reinstall', self.b.run.call_args[0][0])
+
     def test_managed_python_path_stays_unique_on_repeat(self):
         self.b.distro = {'id': 'kali'}
         self.b.install_uv = mock.Mock(return_value=True)

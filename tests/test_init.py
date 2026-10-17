@@ -1323,6 +1323,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_uv = mock.Mock(return_value=True)
         self.bootstrap.pwndbg_uv_packages_available = mock.Mock(return_value=True)
         self.bootstrap.find_command = mock.Mock(return_value="/home/test/.local/bin/pwndbg")
+        self.bootstrap.pwndbg_launcher_available = mock.Mock(return_value=True)
         self.bootstrap.run = mock.Mock()
 
         self.assertTrue(self.bootstrap.install_pwndbg_uv())
