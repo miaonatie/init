@@ -1680,8 +1680,20 @@ class Bootstrap:
                 check=False, timeout=600,
             )
             if result.returncode != 0:
-                self.failures.append("isolated Python 3.12 environment installation failed")
-                return False
+                # uv may create the venv successfully but fail fetching pip.
+                # CPython's bundled wheel can finish that bootstrap offline.
+                self.warn("Python environment setup failed; trying bundled pip offline")
+                seed = self.run(
+                    [str(python), "-m", "ensurepip", "--upgrade"],
+                    check=False, timeout=60,
+                )
+                probe = self.run(
+                    [str(python), "-c", "import sys, pip; assert sys.version_info[:2] == (3, 12)"],
+                    check=False, capture=True, timeout=30,
+                )
+                if seed.returncode != 0 or probe.returncode != 0:
+                    self.failures.append("isolated Python 3.12 environment installation failed")
+                    return False
         # Only the interactive shell PATH changes; /usr/bin/python3 stays intact.
         body = f'export PATH={shlex.quote(str(python.parent))}:"$PATH"'
         for profile in (BASHRC, ZSHRC):

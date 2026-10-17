@@ -119,6 +119,27 @@ class EnvironmentTests(unittest.TestCase):
             self.assertTrue(self.b.prepare_python_tools())
             self.assertEqual(os.environ['PATH'].split(os.pathsep).count(python_bin), 1)
 
+    def test_managed_python_recovers_when_pip_seed_download_fails(self):
+        self.b.distro = {'id': 'kali'}
+        self.b.install_uv = mock.Mock(return_value=True)
+        self.b.uv_executable = mock.Mock(return_value='/bin/uv')
+        self.b.update_managed_block = mock.Mock()
+        for repaired in (True, False):
+            with self.subTest(repaired=repaired), tempfile.TemporaryDirectory() as directory:
+                python = Path(directory) / 'python/bin/python3'
+                self.b.system_python = mock.Mock(return_value=str(python))
+                self.b.run = mock.Mock(side_effect=[
+                    subprocess.CompletedProcess([], 1),
+                    subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0 if repaired else 1),
+                ])
+                self.b.failures.clear()
+                with mock.patch.dict(os.environ):
+                    self.assertEqual(self.b.prepare_python_tools(), repaired)
+                self.assertEqual(self.b.run.call_args_list[1][0][0],
+                                 [str(python), '-m', 'ensurepip', '--upgrade'])
+                self.assertEqual(bool(self.b.failures), not repaired)
+
     def test_python_interpreter_matrix(self):
         for distro, version, isolated in [('ubuntu', '18.04', True), ('ubuntu', '20.04', True),
                                          ('ubuntu', '22.04', True), ('ubuntu', '24.04', True),
