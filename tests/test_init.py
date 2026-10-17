@@ -22,6 +22,35 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap = MODULE.Bootstrap()
         self.bootstrap.distro = {"id": "ubuntu", "version": "24.04", "codename": "noble", "ubuntu_codename": "noble", "name": "Ubuntu"}
 
+    def test_user_path_profiles_find_later_installed_tools_and_are_idempotent(self):
+        with tempfile.TemporaryDirectory(prefix="init home ") as directory:
+            home = Path(directory)
+            bashrc, zshrc = home / ".bashrc", home / ".zshrc"
+            with mock.patch.object(MODULE, "BASHRC", bashrc), mock.patch.object(MODULE, "ZSHRC", zshrc):
+                self.bootstrap.configure_tool_paths()
+                first = bashrc.read_text()
+                self.bootstrap.configure_tool_paths()
+                self.assertEqual(first, bashrc.read_text())
+                self.assertEqual(first, zshrc.read_text())
+            local = home / ".local/bin"
+            local.mkdir(parents=True)
+            launcher = local / "codex"
+            launcher.write_text("#!/bin/sh\nprintf 'linux-codex'\n")
+            launcher.chmod(0o755)
+            original = f"/mnt/c/Program Files/tools:/usr/bin:{local}:/usr/bin:/tmp/a*b::"
+            expected = f"{local}:{home}/bin:/usr/local/bin:/mnt/c/Program Files/tools:/usr/bin:/tmp/a*b:"
+            for shell in ("bash", "zsh"):
+                executable = MODULE.shutil.which(shell)
+                if not executable:
+                    continue
+                with self.subTest(shell=shell):
+                    result = subprocess.run(
+                        [executable, "-f", "-c", '. "$1"; . "$1"; printf "%s\\n" "$PATH"; codex', "test", str(bashrc)],
+                        env={"HOME": str(home), "PATH": original},
+                        capture_output=True, text=True, check=True,
+                    )
+                    self.assertEqual(result.stdout, expected + "\nlinux-codex")
+
     def test_wsl_installer_path_excludes_windows_drives_only_in_process(self):
         self.bootstrap.is_wsl = True
         original = "/mnt/c/Users/test/Python/Scripts:/usr/bin:/mnt/D/Programs:/mnt/data/bin"

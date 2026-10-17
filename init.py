@@ -950,13 +950,19 @@ class Bootstrap:
 
     def configure_tool_paths(self) -> None:
         """Make user-installed commands available in new Bash and Zsh sessions."""
-        body = (
-            'for _init_bin in /usr/local/bin "$HOME/.local/bin"; do\n'
-            '  case ":$PATH:" in *":$_init_bin:"*) ;; '
-            '*) export PATH="$_init_bin:$PATH" ;; esac\n'
-            'done\n'
-            'unset _init_bin'
-        )
+        body = '''_init_path_rest="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH:"
+_init_path_result=:
+while [ -n "$_init_path_rest" ]; do
+    _init_path_entry=${_init_path_rest%%:*}
+    _init_path_rest=${_init_path_rest#*:}
+    case "$_init_path_result" in
+        *:"$_init_path_entry":*) ;;
+        *) _init_path_result="${_init_path_result}${_init_path_entry}:" ;;
+    esac
+done
+_init_path_result=${_init_path_result#:}
+export PATH=${_init_path_result%:}
+unset _init_path_rest _init_path_result _init_path_entry'''
         for profile in (BASHRC, ZSHRC):
             self.update_managed_block(profile, "# >>> init tool paths >>>",
                                       "# <<< init tool paths <<<", body)
