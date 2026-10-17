@@ -547,6 +547,11 @@ class Bootstrap:
             value = str(candidate)
             if value not in current:
                 current.insert(0, value)
+        if self.uses_managed_python():
+            managed = Path(self.system_python()).parent
+            if (managed / "python3").is_file() and os.access(managed / "python3", os.X_OK):
+                value = str(managed)
+                current = [value] + [path for path in current if path != value]
         os.environ["PATH"] = os.pathsep.join(current)
 
     def run(

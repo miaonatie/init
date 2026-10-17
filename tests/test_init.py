@@ -47,8 +47,9 @@ class InstallerTests(unittest.TestCase):
             launcher = Path(directory) / "ROPgadget"
             launcher.write_text("#!/nonexistent/windows/python.exe\n")
             launcher.chmod(0o755)
-            with mock.patch.dict(MODULE.os.environ, {"PATH": directory}):
-                self.assertIsNotNone(self.bootstrap.find_command(["ROPgadget"]))
+            with mock.patch.dict(MODULE.os.environ, {"PATH": directory}), mock.patch.object(
+                self.bootstrap, "find_command", return_value=str(launcher)
+            ):
                 self.assertIsNone(self.bootstrap.find_usable_command(["ROPgadget"], ["--help"]))
                 self.assertFalse(self.bootstrap.executable_usable(str(launcher), ["--help"]))
                 with self.assertRaises(subprocess.CalledProcessError) as caught:

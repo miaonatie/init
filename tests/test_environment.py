@@ -38,6 +38,23 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(self.b.find_usable_command(['ROPgadget', 'ropgadget'], ['--help']),
                          '/bin/ropgadget')
 
+    def test_fresh_check_prefers_managed_tools_without_reloading_the_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            bin_dir = home / '.local/share/init/python/bin'
+            bin_dir.mkdir(parents=True)
+            for name in ('python3', 'pwn'):
+                path = bin_dir / name
+                path.write_text('#!/bin/sh\nexit 0\n')
+                path.chmod(0o755)
+            self.b.distro = {'id': 'kali'}
+            with mock.patch.object(init, 'HOME', home), mock.patch.dict(os.environ):
+                os.environ['PATH'] = '/usr/local/bin:/usr/bin:' + str(bin_dir)
+                self.b._extend_path()
+                self.assertEqual(self.b.find_command(['pwn']), str(bin_dir / 'pwn'))
+                self.assertEqual(os.environ['PATH'].split(os.pathsep)[0], str(bin_dir))
+                self.assertEqual(os.environ['PATH'].split(os.pathsep).count(str(bin_dir)), 1)
+
     def test_git_network_stalls_are_bounded_and_overrides_are_preserved(self):
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
                 subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as run:
