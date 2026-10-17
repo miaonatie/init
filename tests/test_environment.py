@@ -16,8 +16,8 @@ class EnvironmentTests(unittest.TestCase):
     def setUp(self):
         self.b = init.Bootstrap()
 
-    def test_check_and_repair_do_not_run_full_installation(self):
-        for args, method in [(['--check'], 'check'), (['--repair', 'pwndbg'], 'repair_pwndbg')]:
+    def test_check_does_not_run_full_installation(self):
+        for args, method in [(['--check'], 'check')]:
             with self.subTest(args=args), mock.patch.object(init, 'Bootstrap') as constructor:
                 b = constructor.return_value
                 getattr(b, method).return_value = 0

@@ -89,7 +89,7 @@ def main():
     assert check.check() == 0, check.failures
     assert before == {str(p): digest(p) for p in profiles}, 'configuration changed during check'
     assert digest(system_python) == system_digest
-    print('PASS: full installation, verification, CLI repair and repeat installation')
+    print('PASS: full installation, verification, automatic repair and repeat installation')
     print('Compatibility skips:', repeat.skipped)
 
 

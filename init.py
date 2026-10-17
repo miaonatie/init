@@ -4405,11 +4405,6 @@ except gdb.error:
         self.verify()
         return self.summary()
 
-    def repair_pwndbg(self) -> int:
-        print(self.colorize("36;1", f"init {VERSION} | Repair Pwndbg"))
-        self.install_pwndbg_environment()
-        return self.summary()
-
     def remove_portable_pwndbg_only(self) -> int:
         print(self.colorize("36;1", f"init {VERSION}"))
         print("Removing only the legacy portable Pwndbg integration")
@@ -4426,8 +4421,6 @@ Usage:
   python3 init.py          Initialize and verify the CTF environment
   python3 init.py --update Update managed tools, then verify everything
   python3 init.py --check  Check the environment without installing tools
-  python3 init.py --repair pwndbg
-                           Repair and verify the debugger environment only
   python3 init.py --remove-portable-pwndbg
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
@@ -4447,7 +4440,7 @@ def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--update"], ["--check"], ["--repair", "pwndbg"],
+    if argv not in ([], ["--update"], ["--check"],
                     ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
@@ -4456,8 +4449,6 @@ def main(argv: 'list[str]') -> int:
     try:
         if argv == ["--check"]:
             return bootstrap.check()
-        if argv == ["--repair", "pwndbg"]:
-            return bootstrap.repair_pwndbg()
         if argv == ["--remove-portable-pwndbg"]:
             return bootstrap.remove_portable_pwndbg_only()
         return bootstrap.install()
