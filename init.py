@@ -3244,6 +3244,7 @@ except gdb.error:
             timeout=timeout,
             env={
                 "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
+                "NODE_USE_ENV_PROXY": "1",
                 "NVM_INSTALL_LOCK_TIMEOUT": "20",
                 "NVM_INSTALL_LOCK_STALE": "10",
                 "npm_config_fetch_retries": "2",
