@@ -2247,6 +2247,39 @@ class InstallerTests(unittest.TestCase):
                 self.assertFalse(self.bootstrap.configure_glibc_library())
             self.assertIn(f"glibc download failed: {package}", self.bootstrap.failures)
 
+    def test_old_glibc_uses_archive_and_failure_does_not_block_other_versions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            aio, library = root / 'aio', root / 'glibc'
+            aio.mkdir()
+            old, good = '2.30-0ubuntu2.2_i386', '2.35-0ubuntu3.15_amd64'
+            (aio / 'list').write_text(good + '\n[old]\n' + old + '\n')
+            self.bootstrap.glibc_aio_latest_packages = mock.Mock(
+                return_value={('2.30', 'i386'): old, ('2.35', 'amd64'): good})
+
+            def fake_run(command, **_kwargs):
+                if 'download' in command:
+                    if old in command:
+                        return subprocess.CompletedProcess(command, 1)
+                    target = aio / 'libs' / good
+                    target.mkdir(parents=True)
+                    (target / 'libc.so.6').touch()
+                elif command[:2] == ['mkdir', '-p']:
+                    Path(command[2]).mkdir(parents=True, exist_ok=True)
+                elif command[:2] == ['ln', '-sfn']:
+                    Path(command[3]).symlink_to(command[2])
+                return subprocess.CompletedProcess(command, 0)
+
+            self.bootstrap.run = mock.Mock(side_effect=fake_run)
+            with mock.patch.object(MODULE, 'GLIBC_AIO_DIR', aio), mock.patch.object(MODULE, 'GLIBC_LIBRARY_ROOT', library):
+                self.assertFalse(self.bootstrap.configure_glibc_library())
+            downloads = [call[0][0] for call in self.bootstrap.run.call_args_list
+                         if 'download' in call[0][0]]
+            self.assertEqual(downloads[0][-2:], ['--mirror', 'old-releases'])
+            self.assertNotIn('--mirror', downloads[1])
+            self.assertTrue((library / '2.35/amd64/libc.so.6').is_file())
+            self.assertEqual(self.bootstrap.failures, ['glibc download failed: ' + old])
+
     def test_glibc_library_verification_rejects_empty_target(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

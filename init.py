@@ -3759,6 +3759,11 @@ except gdb.error:
             )
             return False
 
+        try:
+            old_packages = set((GLIBC_AIO_DIR / "list").read_text(encoding="utf-8").partition("[old]")[2].split())
+        except OSError:
+            old_packages = set()
+        ok_all = True
         for (version, arch), package in sorted(
             packages.items(), key=self.glibc_package_sort_key
         ):
@@ -3782,8 +3787,11 @@ except gdb.error:
                         )
                         return False
                 self.info(f"glibc {version} {arch}: downloading {package}")
+                command = [str(GLIBC_AIO_COMMAND), "download", package, "--no-dbg"]
+                if package in old_packages:
+                    command.extend(["--mirror", "old-releases"])
                 download = self.run(
-                    [str(GLIBC_AIO_COMMAND), "download", package, "--no-dbg"],
+                    command,
                     cwd=HOME,
                     check=False,
                     network=True,
@@ -3795,7 +3803,8 @@ except gdb.error:
                     or not self.glibc_package_payload_available(target)
                 ):
                     self.failures.append(f"glibc download failed: {package}")
-                    return False
+                    ok_all = False
+                    continue
 
             version_dir = GLIBC_LIBRARY_ROOT / version
             create_dir = self.run(
@@ -3830,7 +3839,7 @@ except gdb.error:
             if create_link.returncode != 0:
                 self.failures.append(f"glibc library link failed: {link}")
                 return False
-        return True
+        return ok_all
 
     def glibc_library_available(self) -> bool:
         packages = self.glibc_aio_latest_packages()
