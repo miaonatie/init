@@ -69,6 +69,23 @@ def exercise_qemu_qiling(qiling=True):
               (" and Qiling" if qiling else ""))
 
 
+def exercise_squashfs():
+    b = init.Bootstrap()
+    assert b.find_usable_command(["unsquashfs"], init.IOT_PROBES["unsquashfs"]), b._probe_errors
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "source"
+        source.mkdir()
+        (source / "marker").write_text("init-squashfs-ok")
+        image, output = root / "fixture.squashfs", root / "output"
+        subprocess.run(["mksquashfs", str(source), str(image), "-noappend", "-processors", "1"],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        subprocess.run(["unsquashfs", "-d", str(output), str(image)],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        assert (output / "marker").read_text() == "init-squashfs-ok"
+    print("PASS: SquashFS version detection, image creation and actual extraction")
+
+
 def exercise_firmae():
     subprocess.run(["firmae", "start"], check=True, timeout=60)
     try:
@@ -109,6 +126,7 @@ echo PASS: FirmAE PostgreSQL, Binwalk scan, SquashFS and loop partition/mount
 
 
 if __name__ == "__main__":
+    exercise_squashfs()
     exercise_qemu_qiling(qiling="--qemu-only" not in sys.argv)
     if "--firmae" in sys.argv:
         exercise_firmae()

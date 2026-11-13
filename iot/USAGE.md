@@ -101,6 +101,7 @@ ql.run()
 
 Qiling 已用独立 Python 3.12 安装，包含 CLI，不会混用 pwntools 的依赖。
 rootfs 使用自己的固件目录；不会默认下载大体积示例库。
+gevent/greenlet 使用与宿主兼容的预编译包；旧版 Ubuntu 无需为此升级系统 GCC。
 缺库、`/dev`、ioctl 或 NVRAM 时，仍需按目标程序补环境/hook。
 
 ## 4. FirmAE：整机仿真

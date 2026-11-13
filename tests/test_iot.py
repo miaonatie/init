@@ -251,6 +251,43 @@ class IoTTests(unittest.TestCase):
             self.assertIn(str(self.root / "qiling/bin/python"), command)
             self.assertIn(init.QILING_SPEC, command)
             self.assertNotIn("--system", command)
+            binary_options = [command[i + 1] for i, arg in enumerate(command) if arg == "--only-binary"]
+            self.assertEqual(binary_options, ["gevent", "greenlet"])
+
+    def test_old_unsquashfs_valid_version_exit_is_accepted_but_errors_are_not(self):
+        b = init.Bootstrap()
+        for code, output, expected in (
+            (1, "unsquashfs version 4.3 (2014/05/12)\nUsage: unsquashfs [options] filesystem", True),
+            (0, "unsquashfs version 4.6.1\n", True),
+            (1, "unsquashfs: error while loading shared libraries: liblzma.so", False),
+            (1, "Usage: unsquashfs [options] filesystem", False),
+            (2, "unsquashfs version 4.3\n", False),
+        ):
+            with self.subTest(code=code, output=output), mock.patch.object(
+                    b, "run", return_value=subprocess.CompletedProcess([], code, output, "")):
+                self.assertEqual(b.executable_usable("/usr/bin/unsquashfs", ["-version"]), expected)
+        self.assertEqual(init.IOT_PROBES["unsquashfs"], ["-version"])
+
+    def test_old_ubuntu_missing_ripgrep_is_optional_in_iot_too(self):
+        b = init.Bootstrap()
+        b.distro = {"id": "ubuntu", "version": "18.04"}
+        b.apt_update = mock.Mock(return_value=True)
+        b.package_installed = mock.Mock(return_value=False)
+        b.package_available = mock.Mock(return_value=False)
+        self.assertNotIn("ripgrep", init.IOT_APT)
+        self.assertEqual(b.compatible_packages(init.IOT_OPTIONAL_APT, optional=True), [])
+        self.assertIn("ripgrep", b.compat_skips)
+        self.assertFalse(b.failures)
+
+    def test_qiling_probe_preserves_error_details_for_verification(self):
+        b = init.Bootstrap()
+        (self.root / "bin").mkdir()
+        for name in ("python", "qltool"):
+            (self.root / "bin" / name).touch()
+        with mock.patch.object(init, "QILING_DIR", self.root), mock.patch.object(
+                b, "run", return_value=subprocess.CompletedProcess([], 1, "", "ImportError: libunicorn missing")):
+            self.assertFalse(b.qiling_available())
+        self.assertIn("ImportError: libunicorn missing", b._probe_errors[str(self.root / "bin/python")])
 
 
 if __name__ == "__main__":

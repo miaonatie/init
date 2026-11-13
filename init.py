@@ -85,8 +85,9 @@ IOT_APT = [
     "qemu-user", "qemu-system-arm", "qemu-system-mips", "qemu-utils",
     "gdb-multiarch", "binutils-multiarch", "binwalk", "file", "squashfs-tools",
     "mtd-utils", "device-tree-compiler", "cpio", "lzop", "xz-utils", "unzip",
-    "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git", "ripgrep",
+    "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git",
 ]
+IOT_OPTIONAL_APT = ["ripgrep"]
 IOT_RUNTIME = HOME / ".local/share/init/iot"
 QILING_DIR = HOME / ".local/share/init/qiling"
 QILING_SPEC = "git+https://github.com/qilingframework/qiling@86c927cb329993b14e2586e04d1dd7a90deee5fb"
@@ -99,7 +100,7 @@ IOT_PROBES = {
     "qemu-system-mips": ["--version"], "qemu-system-mipsel": ["--version"],
     "qemu-system-arm": ["--version"], "qemu-system-aarch64": ["--version"],
     "qemu-img": ["--version"], "gdb-multiarch": ["--version"],
-    "binwalk": ["--help"], "unsquashfs": ["-help"], "dtc": ["--version"],
+    "binwalk": ["--help"], "unsquashfs": ["-version"], "dtc": ["--version"],
 }
 
 I386_APT = [
@@ -456,8 +457,14 @@ class Bootstrap:
         version_exit = (Path(executable).name in {"neowofetch", "neofetch"}
                         and arguments == ["--version"] and result.returncode == 1
                         and bool(re.search(r"\b(?:neofetch|neowofetch)\s+[0-9]", output)))
+        # SquashFS 4.3/4.4 print a valid version but exit 1 without an image.
+        squashfs_version_exit = (
+            Path(executable).name == "unsquashfs" and arguments == ["-version"]
+            and result.returncode == 1
+            and bool(re.search(r"(?m)^unsquashfs version [0-9]+\.", output))
+        )
         usable = (
-            (result.returncode == 0 or usage_exit or version_exit)
+            (result.returncode == 0 or usage_exit or version_exit or squashfs_version_exit)
             and not any(marker in output for marker in broken_markers)
         )
         if not usable:
@@ -4074,6 +4081,10 @@ except gdb.error:
             "q = Qiling(code=bytes.fromhex('b83c00000031ff0f05'), "
             "archtype=QL_ARCH.X8664, ostype=QL_OS.LINUX, verbose=QL_VERBOSE.OFF); q.run()"],
             check=False, capture=True, timeout=30)
+        if probe.returncode != 0:
+            self._probe_errors[str(python)] = self.probe_error_details(probe) or f"exit {probe.returncode}"
+            return False
+        self._probe_errors.pop(str(python), None)
         return probe.returncode == 0 and self.executable_usable(str(cli), ["--help"])
 
     def install_qiling(self) -> bool:
@@ -4090,6 +4101,9 @@ except gdb.error:
                 self.failures.append("Qiling Python environment creation failed")
                 return False
         result = self.run([uv, "pip", "install", "--python", str(QILING_DIR / "bin/python"),
+                           # On glibc 2.27, resolve an older compatible wheel instead
+                           # of compiling new gevent with an incompatible old GCC.
+                           "--only-binary", "gevent", "--only-binary", "greenlet",
                            "--reinstall", QILING_SPEC], check=False, network=True, timeout=600)
         if result.returncode != 0 or not self.qiling_available():
             self.failures.append("Qiling installation/emulation probe failed")
@@ -4098,6 +4112,8 @@ except gdb.error:
 
     def install_iot_environment(self) -> None:
         self.apt_install(self.compatible_packages(IOT_APT), "IoT firmware and emulation tools", required=True)
+        self.apt_install(self.compatible_packages(IOT_OPTIONAL_APT, optional=True),
+                         "optional IoT search tools", required=True)
         self.install_qemu_static()
         self.repair_distro_python_commands()
         self.install_qiling()
@@ -4156,7 +4172,9 @@ except gdb.error:
                 self.failures.append(f"verification failed: static QEMU ELF for {arch}")
         if not self.qiling_available():
             ok_all = False
-            self.failures.append("verification failed: Qiling CLI/emulation")
+            detail = (self._probe_errors.get(str(QILING_DIR / "bin/python"))
+                      or self._probe_errors.get(str(QILING_DIR / "bin/qltool")))
+            self.failures.append("verification failed: Qiling CLI/emulation" + (f": {detail}" if detail else ""))
         for name in ("firmae", "iot-help", "qltool", "qiling-python"):
             arguments = ["--help"] if name != "qiling-python" else ["--version"]
             if not self.find_usable_command([name], arguments):
