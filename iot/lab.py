@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parent
 def run(command, capture=False, check=True, timeout=None):
     return subprocess.run(command, stdout=subprocess.PIPE if capture else None,
                           stderr=subprocess.PIPE if capture else None,
-                          universal_newlines=True, check=check, timeout=timeout)
+                          universal_newlines=True, encoding="utf-8", errors="replace",
+                          check=check, timeout=timeout)
 
 
 class Lab:
@@ -204,7 +205,7 @@ def main(argv=None):
         values.insert(0, "--")
     args = parser.parse_args(values)
     if args.command == "help":
-        print((ROOT / "USAGE.md").read_text(encoding="utf-8"))
+        sys.stdout.buffer.write((ROOT / "USAGE.md").read_bytes())
         return 0
     lab = Lab()
     if args.command == "build":

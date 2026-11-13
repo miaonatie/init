@@ -85,7 +85,7 @@ IOT_APT = [
     "qemu-user", "qemu-user-static", "qemu-system-arm", "qemu-system-mips", "qemu-utils",
     "gdb-multiarch", "binutils-multiarch", "binwalk", "file", "squashfs-tools",
     "mtd-utils", "device-tree-compiler", "cpio", "lzop", "xz-utils", "unzip",
-    "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git",
+    "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git", "ripgrep",
 ]
 IOT_RUNTIME = HOME / ".local/share/init/iot"
 QILING_DIR = HOME / ".local/share/init/qiling"
@@ -4115,6 +4115,7 @@ except gdb.error:
         if not check:
             self.preflight()
             self.configure_tool_paths()
+            self.apt_install(["ca-certificates", "curl", "git"], "IoT download prerequisites", required=True)
             self.install_docker()
             self.install_iot_environment()
         self.verify_iot()

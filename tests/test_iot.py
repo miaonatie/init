@@ -22,7 +22,7 @@ class IoTTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         for name in ("Dockerfile", "entrypoint.sh", "USAGE.md"):
-            (self.root / name).write_text((init.ROOT / "iot" / name).read_text())
+            (self.root / name).write_text((init.ROOT / "iot" / name).read_text(encoding="utf-8"), encoding="utf-8")
         (self.root / "config.json").write_text(json.dumps({
             "firmae": str(self.root / "source checkout"), "revision": init.FIRMAE_REVISION}))
         self.lab = lab.Lab(self.root)

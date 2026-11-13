@@ -47,7 +47,8 @@ class InstallerTests(unittest.TestCase):
                     result = subprocess.run(
                         [executable, "-f", "-c", '. "$1"; . "$1"; printf "%s\\n" "$PATH"; codex', "test", str(bashrc)],
                         env={"HOME": str(home), "PATH": original},
-                        capture_output=True, text=True, check=True,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        universal_newlines=True, check=True,
                     )
                     self.assertEqual(result.stdout, expected + "\nlinux-codex")
 
