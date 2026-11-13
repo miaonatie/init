@@ -2128,6 +2128,7 @@ class InstallerTests(unittest.TestCase):
             "install_radare2", "install_r2ghidra", "install_pwndbg_environment",
             "install_helper_repositories", "repair_distro_python_commands",
             "install_checksec_fallback",
+            "install_iot_environment",
         ]
         calls = []
         for name in names:

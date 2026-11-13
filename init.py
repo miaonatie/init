@@ -2,6 +2,7 @@
 """Idempotent CTF workstation bootstrap for Ubuntu and Kali."""
 
 import errno
+import json
 import os
 import platform
 import pwd
@@ -78,6 +79,27 @@ CTF_APT = [
     "zbar-tools", "qrencode", "tesseract-ocr", "poppler-utils", "qpdf",
     "hashcat", "john", "tshark", "sqlite3", "bc", "xmlstarlet", "openssl",
 ]
+
+# Explicit emulators work without binfmt registration (including under WSL2).
+IOT_APT = [
+    "qemu-user", "qemu-user-static", "qemu-system-arm", "qemu-system-mips", "qemu-utils",
+    "gdb-multiarch", "binutils-multiarch", "binwalk", "file", "squashfs-tools",
+    "mtd-utils", "device-tree-compiler", "cpio", "lzop", "xz-utils", "unzip",
+    "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git",
+]
+IOT_RUNTIME = HOME / ".local/share/init/iot"
+QILING_DIR = HOME / ".local/share/init/qiling"
+QILING_SPEC = "git+https://github.com/qilingframework/qiling@86c927cb329993b14e2586e04d1dd7a90deee5fb"
+FIRMAE_DIR = TOOLS_DIR / "FirmAE"
+FIRMAE_REVISION = "653565b5d14e6d69a1dd242aa88ecfb4b090a74a"
+IOT_PROBES = {
+    **{f"qemu-{arch}{suffix}": ["--version"]
+       for arch in ("mips", "mipsel", "arm", "aarch64") for suffix in ("", "-static")},
+    "qemu-system-mips": ["--version"], "qemu-system-mipsel": ["--version"],
+    "qemu-system-arm": ["--version"], "qemu-system-aarch64": ["--version"],
+    "qemu-img": ["--version"], "gdb-multiarch": ["--version"],
+    "binwalk": ["--help"], "unsquashfs": ["-help"], "dtc": ["--version"],
+}
 
 I386_APT = [
     "gcc-multilib", "g++-multilib", "libc6-i386", "libc6-dev-i386", "libc6-dbg:i386",
@@ -721,7 +743,7 @@ class Bootstrap:
     def planned_apt_packages(self) -> 'list[str]':
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         i386 = I386_APT if self.arch in {"x86_64", "amd64"} else []
-        return list(dict.fromkeys([*REQUIRED_APT, *DAILY_APT, *CTF_APT, *distro_packages, *i386]))
+        return list(dict.fromkeys([*REQUIRED_APT, *DAILY_APT, *CTF_APT, *IOT_APT, *distro_packages, *i386]))
 
     def installation_space_limits(self) -> 'tuple[int, int]':
         missing = sum(not self.package_installed(package) for package in self.planned_apt_packages())
@@ -3980,6 +4002,124 @@ except gdb.error:
         self._pwndbg_backend_cache = self.pwndbg_imports_available(probe)
         return self._pwndbg_backend_cache
 
+    def qiling_available(self) -> bool:
+        python = QILING_DIR / "bin/python"
+        cli = QILING_DIR / "bin/qltool"
+        if not python.is_file() or not cli.is_file():
+            return False
+        # Execute CPU instructions/syscalls as well as checking the entry point.
+        probe = self.run([str(python), "-c",
+            "from importlib.metadata import version; "
+            "assert version('qiling') == '1.4.11'; "
+            "from qiling import Qiling; from qiling.const import QL_ARCH, QL_OS, QL_VERBOSE; "
+            "q = Qiling(code=bytes.fromhex('b83c00000031ff0f05'), "
+            "archtype=QL_ARCH.X8664, ostype=QL_OS.LINUX, verbose=QL_VERBOSE.OFF); q.run()"],
+            check=False, capture=True, timeout=30)
+        return probe.returncode == 0 and self.executable_usable(str(cli), ["--help"])
+
+    def install_qiling(self) -> bool:
+        if self.qiling_available():
+            self.ok("Qiling: isolated Python environment and emulation probe ready")
+            return True
+        if not self.install_uv():
+            return False
+        uv = self.uv_executable()
+        if not (QILING_DIR / "bin/python").is_file():
+            result = self.run([uv, "venv", "--python", "3.12", str(QILING_DIR)],
+                              check=False, network=True, timeout=300)
+            if result.returncode != 0:
+                self.failures.append("Qiling Python environment creation failed")
+                return False
+        result = self.run([uv, "pip", "install", "--python", str(QILING_DIR / "bin/python"),
+                           "--reinstall", QILING_SPEC], check=False, network=True, timeout=600)
+        if result.returncode != 0 or not self.qiling_available():
+            self.failures.append("Qiling installation/emulation probe failed")
+            return False
+        return True
+
+    def install_iot_environment(self) -> None:
+        self.apt_install(self.compatible_packages(IOT_APT), "IoT firmware and emulation tools", required=True)
+        self.repair_distro_python_commands()
+        self.install_qiling()
+        assets = ROOT / "iot"
+        IOT_RUNTIME.mkdir(parents=True, exist_ok=True)
+        for name in ("lab.py", "Dockerfile", "entrypoint.sh", "USAGE.md"):
+            source = assets / name
+            if not source.is_file():
+                self.failures.append(f"IoT asset missing: {source}; use a complete git checkout")
+                return
+            self.write_text_if_changed(IOT_RUNTIME / name, source.read_text(encoding="utf-8"))
+        config = {"firmae": str(FIRMAE_DIR), "revision": FIRMAE_REVISION,
+                  "qiling": str(QILING_DIR)}
+        self.write_text_if_changed(IOT_RUNTIME / "config.json", json.dumps(config, indent=2) + "\n")
+        for name, command in {
+            "firmae": ["/usr/bin/python3", str(IOT_RUNTIME / "lab.py")],
+            "iot-help": ["/usr/bin/python3", str(IOT_RUNTIME / "lab.py"), "help"],
+            "qltool": [str(QILING_DIR / "bin/qltool")],
+            "qiling-python": [str(QILING_DIR / "bin/python")],
+        }.items():
+            content = "#!/bin/sh\nexec " + " ".join(shlex.quote(arg) for arg in command) + ' "$@"\n'
+            if not self.install_command_wrapper(Path("/usr/local/bin") / name, content):
+                self.failures.append(f"IoT launcher installation failed: {name}")
+        if self.arch not in {"x86_64", "amd64"}:
+            self.skip_compat("FirmAE", "container currently requires an x86_64 Linux host; Qiling/QEMU remain usable")
+            return
+        if not self.clone_or_update_at("FirmAE", "https://github.com/pr0v3rbs/FirmAE.git", FIRMAE_DIR):
+            return
+        revision = self.run(["git", "-C", str(FIRMAE_DIR), "cat-file", "-e", FIRMAE_REVISION + "^{commit}"],
+                            check=False, capture=True, timeout=30)
+        if revision.returncode != 0:
+            fetch = self.run(["git", "-C", str(FIRMAE_DIR), "fetch", "--depth", "1", "origin", FIRMAE_REVISION],
+                             check=False, network=True, timeout=300)
+            if fetch.returncode != 0:
+                self.failures.append("FirmAE pinned source fetch failed")
+                return
+        # No host PostgreSQL, upstream install.sh, Docker socket mounts or analyzer browser stack.
+        # Build only when a daemon is reachable; CI containers/WSL without Docker stay preparable.
+        result = self.run(["/usr/bin/python3", str(IOT_RUNTIME / "lab.py"), "build", "--if-available"],
+                          check=False, timeout=3600)
+        if result.returncode == 3:
+            self.skip_compat("FirmAE image", "Docker daemon unavailable; start Docker, then run firmae build")
+        elif result.returncode != 0:
+            self.failures.append("FirmAE container build/self-test failed; retry with firmae build")
+        self.info("IoT quick reference: iot-help | readiness: firmae doctor")
+
+    def verify_iot(self) -> bool:
+        ok_all = True
+        for name, arguments in IOT_PROBES.items():
+            if not self.find_usable_command([name], arguments):
+                ok_all = False
+                self.failures.append(f"verification failed: IoT command {name}")
+        if not self.qiling_available():
+            ok_all = False
+            self.failures.append("verification failed: Qiling CLI/emulation")
+        for name in ("firmae", "iot-help", "qltool", "qiling-python"):
+            arguments = ["--help"] if name != "qiling-python" else ["--version"]
+            if not self.find_usable_command([name], arguments):
+                ok_all = False
+                self.failures.append(f"verification failed: {name} launcher")
+        if self.arch in {"x86_64", "amd64"}:
+            # --check is read-only: no clone, daemon start, image pull or container creation.
+            result = self.run(["/usr/bin/python3", str(IOT_RUNTIME / "lab.py"), "check"],
+                              check=False, capture=True, timeout=30)
+            if result.returncode == 3:
+                self.skip_compat("FirmAE runtime", "Docker daemon unavailable; run firmae doctor after starting Docker")
+            elif result.returncode != 0:
+                ok_all = False
+                self.failures.append("verification failed: FirmAE source/image; run firmae doctor")
+        if ok_all:
+            self.ok("IoT tools: QEMU ARM/MIPS/AArch64, extraction, Qiling and FirmAE preparation checked")
+        return ok_all
+
+    def iot_only(self, *, check: bool = False) -> int:
+        if not check:
+            self.preflight()
+            self.configure_tool_paths()
+            self.install_docker()
+            self.install_iot_environment()
+        self.verify_iot()
+        return self.summary()
+
     def install_ctf_toolchain(self) -> None:
         self.install_python2_legacy()
         if self.prepare_python_tools():
@@ -3994,6 +4134,7 @@ except gdb.error:
             self.install_r2ghidra()
         self.install_pwndbg_environment()
         self.install_helper_repositories()
+        self.install_iot_environment()
 
     def find_command(self, names: 'list[str]') -> 'str | None':
         self._extend_path()
@@ -4375,7 +4516,7 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        return ok_all
+        return self.verify_iot() and ok_all
 
     def summary(self) -> int:
         elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
@@ -4421,6 +4562,9 @@ def help_text() -> str:
 Usage:
   python3 init.py          Initialize and verify the CTF environment
   python3 init.py --check  Check the environment without installing tools
+  python3 init.py --iot    Install/repair only the IoT firmware environment
+  python3 init.py --iot-check
+                           Check only the IoT environment (read-only)
   python3 init.py --remove-portable-pwndbg
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
@@ -4430,6 +4574,9 @@ Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
 instead of installing current Pwndbg. System Python and glibc are not replaced.
 
 The default operation skips usable tools and automatically repairs broken ones.
+IoT: iot-help lists extraction, QEMU, Qiling and FirmAE examples. FirmAE builds
+an isolated emulation/debug image when Docker is reachable; otherwise run
+firmae build later. It requires x86_64 Linux with TUN and loop devices to run.
 After git pull, run this script again to apply changes. It also migrates the legacy
 portable Pwndbg installation to system GDB plus uv. The installer never runs
 full-upgrade or autoremove.
@@ -4440,13 +4587,15 @@ def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--check"],
+    if argv not in ([], ["--check"], ["--iot"], ["--iot-check"],
                     ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
     bootstrap = Bootstrap()
     try:
+        if argv in (["--iot"], ["--iot-check"]):
+            return bootstrap.iot_only(check=argv == ["--iot-check"])
         if argv == ["--check"]:
             return bootstrap.check()
         if argv == ["--remove-portable-pwndbg"]:

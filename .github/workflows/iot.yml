@@ -1,0 +1,33 @@
+name: IoT environment
+
+on:
+  push:
+    paths: [init.py, 'iot/**', 'tests/*iot*', '.github/workflows/iot.yml']
+  pull_request:
+    paths: [init.py, 'iot/**', 'tests/*iot*', '.github/workflows/iot.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: iot-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  iot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install IoT tools and build FirmAE image
+        run: python3 init.py --iot
+      - name: Execute foreign ELF and FirmAE device/database tests
+        run: python3 tests/smoke_iot.py --firmae
+      - name: Check repeat installation and read-only verification
+        run: |
+          python3 init.py --iot
+          python3 init.py --iot-check
+      - name: Container diagnostics
+        if: failure()
+        run: firmae logs || true
