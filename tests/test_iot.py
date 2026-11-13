@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import init
+from smoke_iot import minimal_elf
 
 SPEC = importlib.util.spec_from_file_location("iot_lab", init.ROOT / "iot/lab.py")
 lab = importlib.util.module_from_spec(SPEC)
@@ -26,6 +27,111 @@ class IoTTests(unittest.TestCase):
         (self.root / "config.json").write_text(json.dumps({
             "firmae": str(self.root / "source checkout"), "revision": init.FIRMAE_REVISION}))
         self.lab = lab.Lab(self.root)
+
+    def test_static_elf_detection_accepts_real_static_program_and_rejects_dynamic_or_wrapper(self):
+        if not init.shutil.which("readelf"):
+            self.skipTest("readelf not yet installed in the bootstrap container")
+        b = init.Bootstrap()
+        binary = self.root / "static.elf"
+        binary.write_bytes(minimal_elf("aarch64"))
+        # readelf inspects foreign ELF without executing it.
+        self.assertTrue(b.statically_linked_elf(str(binary)))
+        self.assertFalse(b.statically_linked_elf(sys.executable))
+        wrapper = self.root / "wrapper"
+        wrapper.write_text("#!/bin/sh\nexec qemu-arm \"$@\"\n")
+        self.assertFalse(b.statically_linked_elf(str(wrapper)))
+
+    def test_static_elf_detection_rejects_needed_libraries_even_without_interpreter(self):
+        b = init.Bootstrap()
+        binary = self.root / "elf"
+        binary.write_bytes(minimal_elf("arm"))
+        for output in ("  INTERP  0x100 0x200\n", " 0x1 (NEEDED) Shared library: [libc.so.6]\n"):
+            with self.subTest(output=output), mock.patch.object(
+                    b, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
+                self.assertFalse(b.statically_linked_elf(str(binary)))
+
+    def test_modern_qemu_native_static_provider_is_selected_without_legacy_name(self):
+        b = init.Bootstrap()
+        b.find_usable_command = mock.Mock(side_effect=[None, "/usr/bin/qemu-arm"])
+        b.statically_linked_elf = mock.Mock(return_value=True)
+        self.assertEqual(b.qemu_static_command("arm"), "/usr/bin/qemu-arm")
+        b.statically_linked_elf.assert_called_once_with("/usr/bin/qemu-arm")
+
+    def test_dynamic_qemu_is_never_accepted_as_static(self):
+        b = init.Bootstrap()
+        b.find_usable_command = mock.Mock(side_effect=[None, "/usr/bin/qemu-arm"])
+        b.statically_linked_elf = mock.Mock(return_value=False)
+        self.assertIsNone(b.qemu_static_command("arm"))
+
+    def test_modern_provider_adds_real_compatibility_symlinks_and_repeat_is_noop(self):
+        b = init.Bootstrap()
+        commands = self.root / "bin"
+        commands.mkdir()
+        sources = self.root / "native"
+        sources.mkdir()
+        for arch in init.QEMU_USER_ARCHES:
+            (sources / ("qemu-" + arch)).write_bytes(minimal_elf(arch))
+        b.qemu_static_command = mock.Mock(side_effect=lambda arch: str(sources / ("qemu-" + arch)))
+        b.find_usable_command = mock.Mock(side_effect=lambda names, _: (
+            str(commands / names[0]) if (commands / names[0]).exists() else None))
+        b.statically_linked_elf = mock.Mock(return_value=True)
+        b.apt_update = mock.Mock()
+        b.apt_install = mock.Mock()
+        real_run = b.run
+
+        def link(command, **kwargs):
+            if command[:2] == ["ln", "-sfn"]:
+                Path(command[3]).symlink_to(command[2])
+                return subprocess.CompletedProcess(command, 0)
+            return real_run(command, **kwargs)
+
+        with mock.patch.object(init, "QEMU_COMPAT_DIR", commands), mock.patch.object(b, "run", side_effect=link) as run:
+            self.assertTrue(b.install_qemu_static())
+            for arch in init.QEMU_USER_ARCHES:
+                alias = commands / ("qemu-" + arch + "-static")
+                self.assertTrue(alias.is_symlink())
+                self.assertEqual(alias.read_bytes(), minimal_elf(arch))
+            self.assertTrue(b.install_qemu_static())
+            self.assertEqual(sum(c[0][0][:2] == ["ln", "-sfn"] for c in run.call_args_list), 4)
+        b.apt_update.assert_not_called()
+        b.apt_install.assert_not_called()
+        self.assertNotIn("qemu-user-static", init.IOT_APT)
+        self.assertFalse(b.failures)
+
+    def test_legacy_distro_installs_separate_static_package_only_when_needed(self):
+        b = init.Bootstrap()
+        installed = []
+        b.qemu_static_command = mock.Mock(side_effect=lambda arch: (
+            "/usr/bin/qemu-" + arch + "-static" if installed else None))
+        b.apt_update = mock.Mock(return_value=True)
+        b.package_available = mock.Mock(return_value=True)
+        b.apt_install = mock.Mock(side_effect=lambda *args, **kwargs: installed.append(True))
+        b.find_usable_command = mock.Mock(side_effect=lambda names, _: names[0])
+        b.statically_linked_elf = mock.Mock(return_value=True)
+        self.assertTrue(b.install_qemu_static())
+        b.apt_install.assert_called_once_with(["qemu-user-static"], "legacy static QEMU binaries", required=True)
+        self.assertFalse(b.failures)
+
+    def test_missing_static_provider_remains_a_real_error(self):
+        b = init.Bootstrap()
+        b.qemu_static_command = mock.Mock(return_value=None)
+        b.apt_update = mock.Mock(return_value=True)
+        b.package_available = mock.Mock(return_value=False)
+        b.apt_install = mock.Mock()
+        self.assertFalse(b.install_qemu_static())
+        self.assertEqual(len(b.failures), len(init.QEMU_USER_ARCHES))
+        b.apt_install.assert_not_called()
+
+    def test_verification_accepts_native_static_names_without_installing_aliases(self):
+        b = init.Bootstrap()
+        b.arch = "aarch64"  # Does not need the separate x86_64 FirmAE image.
+        b.find_usable_command = mock.Mock(return_value="working")
+        b.qiling_available = mock.Mock(return_value=True)
+        b.qemu_static_command = mock.Mock(side_effect=lambda arch: "/usr/bin/qemu-" + arch)
+        b.install_qemu_static = mock.Mock()
+        self.assertTrue(b.verify_iot())
+        b.install_qemu_static.assert_not_called()
+        self.assertFalse(b.failures)
 
     def test_iot_check_routes_without_installing_or_requesting_sudo(self):
         with mock.patch.object(init, "Bootstrap") as constructor:

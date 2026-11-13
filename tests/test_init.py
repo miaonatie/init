@@ -2206,13 +2206,9 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(link.is_symlink())
                 self.assertEqual(link.resolve(), target.resolve())
                 self.assertTrue(self.bootstrap.glibc_library_available())
+                self.bootstrap.run.reset_mock()
                 self.assertTrue(self.bootstrap.configure_glibc_library())
-                link_commands = [
-                    call[0][0]
-                    for call in self.bootstrap.run.call_args_list
-                    if call[0][0][:2] == ["ln", "-sfn"]
-                ]
-                self.assertEqual(len(link_commands), 1)
+                self.bootstrap.run.assert_not_called()
 
     def test_glibc_library_downloads_missing_payload(self):
         with tempfile.TemporaryDirectory() as directory:

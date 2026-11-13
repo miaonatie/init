@@ -4,6 +4,8 @@ Run after --iot: python3 tests/smoke_iot.py [--firmae]
 Uses only synthetic benign programs and a generated SquashFS filesystem.
 """
 from pathlib import Path
+import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -37,7 +39,8 @@ def minimal_elf(arch):
     return ident + header + segment + struct.pack(endian + "I" * len(instructions), *instructions)
 
 
-def exercise_qemu_qiling():
+def exercise_qemu_qiling(qiling=True):
+    b = init.Bootstrap()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         for arch in ("mips", "mipsel", "arm", "aarch64"):
@@ -47,13 +50,23 @@ def exercise_qemu_qiling():
             for suffix in ("", "-static"):
                 result = subprocess.run(["qemu-" + arch + suffix, str(binary)], timeout=20)
                 assert result.returncode == 42, (arch, suffix, result.returncode)
+            static = b.qemu_static_command(arch)
+            assert static, "no genuine static QEMU for " + arch
+            # Prove the emulator runs after copying into a rootfs with no host libraries.
+            if os.geteuid() == 0:
+                shutil.copy2(static, str(root / "qemu-run"))
+                result = subprocess.run(["chroot", str(root), "/qemu-run", "/" + binary.name], timeout=20)
+                assert result.returncode == 42, ("chroot", arch, result.returncode)
+            if not qiling:
+                continue
             # Load an ELF and emulate a real exit syscall through Qiling's OS layer.
             subprocess.run(["qiling-python", "-c",
                 "from qiling import Qiling; import sys; "
                 "q=Qiling([sys.argv[1]], sys.argv[2]); q.run(); "
                 "assert q.os.exit_code == 42, q.os.exit_code", str(binary), str(root)],
                 check=True, timeout=30)
-        print("PASS: MIPS LE/BE, ARM and AArch64 ELF execution in QEMU/user-static and Qiling")
+        print("PASS: MIPS LE/BE, ARM and AArch64 ELF execution in QEMU and static/chroot" +
+              (" and Qiling" if qiling else ""))
 
 
 def exercise_firmae():
@@ -96,6 +109,6 @@ echo PASS: FirmAE PostgreSQL, Binwalk scan, SquashFS and loop partition/mount
 
 
 if __name__ == "__main__":
-    exercise_qemu_qiling()
+    exercise_qemu_qiling(qiling="--qemu-only" not in sys.argv)
     if "--firmae" in sys.argv:
         exercise_firmae()

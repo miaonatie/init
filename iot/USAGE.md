@@ -34,6 +34,9 @@ qemu-mipsel -L ./squashfs-root ./squashfs-root/bin/busybox ls
 
 根据 `file` 的输出，MIPS 小端用 `qemu-mipsel`，大端用 `qemu-mips`，
 32 位 ARM 用 `qemu-arm`，64 位 ARM 用 `qemu-aarch64`；这些架构均装有 `-static` 版本。
+新版 Kali/Debian 已将静态模拟器合并到 `qemu-user`，可能没有 `qemu-user-static` 包。
+安装器会检查 ELF 是否真正静态链接，并补齐 `qemu-*-static` 兼容链接；旧版 Ubuntu
+仍按需安装独立包。无需为了旧包名降级或更换软件源。
 `-L` 指向固件 rootfs，为动态解释器/库提供前缀，不能提供完整的 chroot 语义。
 如果程序硬编码 `/etc`、`/www` 等路径，使用工作副本上的 chroot 或 Qiling：
 

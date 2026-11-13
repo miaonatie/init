@@ -82,7 +82,7 @@ CTF_APT = [
 
 # Explicit emulators work without binfmt registration (including under WSL2).
 IOT_APT = [
-    "qemu-user", "qemu-user-static", "qemu-system-arm", "qemu-system-mips", "qemu-utils",
+    "qemu-user", "qemu-system-arm", "qemu-system-mips", "qemu-utils",
     "gdb-multiarch", "binutils-multiarch", "binwalk", "file", "squashfs-tools",
     "mtd-utils", "device-tree-compiler", "cpio", "lzop", "xz-utils", "unzip",
     "iproute2", "iputils-ping", "curl", "socat", "tcpdump", "git", "ripgrep",
@@ -92,9 +92,10 @@ QILING_DIR = HOME / ".local/share/init/qiling"
 QILING_SPEC = "git+https://github.com/qilingframework/qiling@86c927cb329993b14e2586e04d1dd7a90deee5fb"
 FIRMAE_DIR = TOOLS_DIR / "FirmAE"
 FIRMAE_REVISION = "653565b5d14e6d69a1dd242aa88ecfb4b090a74a"
+QEMU_USER_ARCHES = ("mips", "mipsel", "arm", "aarch64")
+QEMU_COMPAT_DIR = Path("/usr/local/bin")
 IOT_PROBES = {
-    **{f"qemu-{arch}{suffix}": ["--version"]
-       for arch in ("mips", "mipsel", "arm", "aarch64") for suffix in ("", "-static")},
+    **{f"qemu-{arch}": ["--version"] for arch in QEMU_USER_ARCHES},
     "qemu-system-mips": ["--version"], "qemu-system-mipsel": ["--version"],
     "qemu-system-arm": ["--version"], "qemu-system-aarch64": ["--version"],
     "qemu-img": ["--version"], "gdb-multiarch": ["--version"],
@@ -3836,15 +3837,6 @@ except gdb.error:
                     continue
 
             version_dir = GLIBC_LIBRARY_ROOT / version
-            create_dir = self.run(
-                ["mkdir", "-p", str(version_dir)],
-                sudo=True,
-                check=False,
-            )
-            if create_dir.returncode != 0:
-                self.failures.append(f"glibc library directory creation failed: {version_dir}")
-                return False
-
             link = version_dir / arch
             if (link.exists() or link.is_symlink()) and not link.is_symlink():
                 self.failures.append(
@@ -3859,6 +3851,14 @@ except gdb.error:
                 wanted_target = target
             if current_target == wanted_target:
                 continue
+
+            if not version_dir.is_dir():
+                create_dir = self.run(
+                    ["mkdir", "-p", str(version_dir)], sudo=True, check=False,
+                )
+                if create_dir.returncode != 0:
+                    self.failures.append(f"glibc library directory creation failed: {version_dir}")
+                    return False
 
             create_link = self.run(
                 ["ln", "-sfn", str(target), str(link)],
@@ -4002,6 +4002,65 @@ except gdb.error:
         self._pwndbg_backend_cache = self.pwndbg_imports_available(probe)
         return self._pwndbg_backend_cache
 
+    def statically_linked_elf(self, executable: str) -> bool:
+        """Accept static and static-PIE ELF files, never a dynamic binary/shell wrapper."""
+        try:
+            with Path(executable).open("rb") as stream:
+                if stream.read(4) != b"\x7fELF":
+                    return False
+        except OSError:
+            return False
+        result = self.run(["readelf", "-W", "-l", "-d", executable],
+                          capture=True, check=False, timeout=30, env={"LC_ALL": "C"})
+        output = result.stdout or ""
+        return result.returncode == 0 and not re.search(r"(?m)^\s*INTERP\s|\(NEEDED\)", output)
+
+    def qemu_static_command(self, arch: str) -> 'str | None':
+        # New Kali/Debian ships static qemu-user binaries without the -static suffix.
+        for name in (f"qemu-{arch}-static", f"qemu-{arch}"):
+            candidate = self.find_usable_command([name], ["--version"])
+            if candidate and self.statically_linked_elf(candidate):
+                return candidate
+        return None
+
+    def install_qemu_static(self) -> bool:
+        sources = {arch: self.qemu_static_command(arch) for arch in QEMU_USER_ARCHES}
+        if not all(sources.values()):
+            # Older Ubuntu/Debian still needs a separate package; do not request a
+            # removed/virtual package on distributions where qemu-user provides it.
+            if not self.apt_update():
+                self.failures.append("static QEMU setup failed: APT update unavailable")
+                return False
+            if self.package_available("qemu-user-static"):
+                self.apt_install(["qemu-user-static"], "legacy static QEMU binaries", required=True)
+                sources = {arch: self.qemu_static_command(arch) for arch in QEMU_USER_ARCHES}
+        ok_all = True
+        for arch, source in sources.items():
+            if source is None:
+                self.failures.append(
+                    f"static QEMU unavailable for {arch}: neither qemu-{arch}-static nor "
+                    f"qemu-{arch} is a usable static ELF; check qemu-user/qemu-user-static packages")
+                ok_all = False
+                continue
+            native = Path(source).resolve()
+            # Preserve existing working distro commands. Only add missing legacy
+            # names as real symlinks, so copying one into chroot copies an ELF.
+            alias = self.find_usable_command([f"qemu-{arch}-static"], ["--version"])
+            if alias and self.statically_linked_elf(alias):
+                continue
+            destination = QEMU_COMPAT_DIR / f"qemu-{arch}-static"
+            if destination.exists() and not destination.is_symlink():
+                self.failures.append(f"static QEMU alias conflicts with existing file: {destination}")
+                ok_all = False
+                continue
+            result = self.run(["ln", "-sfn", str(native), str(destination)], sudo=True, check=False)
+            if result.returncode != 0:
+                self.failures.append(f"static QEMU compatibility link failed: {destination}")
+                ok_all = False
+        if ok_all:
+            self.ok("static QEMU ARM/MIPS/AArch64 ready (legacy and merged qemu-user packages supported)")
+        return ok_all
+
     def qiling_available(self) -> bool:
         python = QILING_DIR / "bin/python"
         cli = QILING_DIR / "bin/qltool"
@@ -4039,6 +4098,7 @@ except gdb.error:
 
     def install_iot_environment(self) -> None:
         self.apt_install(self.compatible_packages(IOT_APT), "IoT firmware and emulation tools", required=True)
+        self.install_qemu_static()
         self.repair_distro_python_commands()
         self.install_qiling()
         assets = ROOT / "iot"
@@ -4090,6 +4150,10 @@ except gdb.error:
             if not self.find_usable_command([name], arguments):
                 ok_all = False
                 self.failures.append(f"verification failed: IoT command {name}")
+        for arch in QEMU_USER_ARCHES:
+            if not self.qemu_static_command(arch):
+                ok_all = False
+                self.failures.append(f"verification failed: static QEMU ELF for {arch}")
         if not self.qiling_available():
             ok_all = False
             self.failures.append("verification failed: Qiling CLI/emulation")
