@@ -149,31 +149,72 @@ class EnvironmentTests(unittest.TestCase):
         self.b.update_managed_block = mock.Mock()
         self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
         with mock.patch.object(Path, 'is_file', return_value=True), mock.patch.dict(os.environ):
-            python_bin = str(Path(self.b.system_python()).parent)
+            python_bin = str(Path(self.b.tools_python()).parent)
             os.environ['PATH'] = python_bin + os.pathsep + '/usr/bin'
             self.assertTrue(self.b.prepare_python_tools())
             self.assertTrue(self.b.prepare_python_tools())
             self.assertEqual(os.environ['PATH'].split(os.pathsep).count(python_bin), 1)
 
+    def test_shell_migrates_old_python_path_block_to_explicit_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            python = home / 'tools with spaces/bin/python3'
+            python.parent.mkdir(parents=True)
+            (python.parent / 'activate').write_text('export CTF_TEST_ACTIVE=1\n')
+            profiles = (home / '.bashrc', home / '.zshrc')
+            old = ('# user setting\n# >>> init Python tools >>>\n'
+                   'export PATH=/old/ctf/bin:"$PATH"\n# <<< init Python tools <<<\n')
+            for profile in profiles:
+                profile.write_text(old)
+            with mock.patch.object(init, 'BASHRC', profiles[0]), mock.patch.object(init, 'ZSHRC', profiles[1]):
+                self.b.configure_python_tools_shell(python)
+                before = [profile.read_text() for profile in profiles]
+                self.b.configure_python_tools_shell(python)
+                self.assertEqual(before, [profile.read_text() for profile in profiles])
+            for profile in profiles:
+                self.assertTrue(profile.read_text().startswith('# user setting\n'))
+                result = subprocess.run(
+                    ['bash', '-c', '. "$1"; test "$PATH" = /usr/bin:/bin && '
+                     'test -z "$CTF_TEST_ACTIVE" && ctf_env && test "$CTF_TEST_ACTIVE" = 1',
+                     'test', str(profile)], env={'PATH': '/usr/bin:/bin', 'HOME': directory})
+                self.assertEqual(result.returncode, 0)
+
+    def test_python_venv_base_uses_system_runtime_or_falls_back(self):
+        for code in (0, 1):
+            with mock.patch.object(Path, 'is_file', return_value=True):
+                self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], code))
+                self.assertEqual(self.b.python_venv_base(),
+                                 str(Path('/usr/bin/python3').resolve()) if code == 0 else '3.12')
+                self.assertEqual(self.b.run.call_args[0][0][0], '/usr/bin/python3')
+
     def test_managed_python_recovers_when_pip_seed_download_fails(self):
         self.b.distro = {'id': 'kali'}
         self.b.install_uv = mock.Mock(return_value=True)
         self.b.uv_executable = mock.Mock(return_value='/bin/uv')
+        self.b.python_venv_base = mock.Mock(return_value='/usr/bin/python3.14')
         self.b.update_managed_block = mock.Mock()
         for repaired in (True, False):
             with self.subTest(repaired=repaired), tempfile.TemporaryDirectory() as directory:
                 python = Path(directory) / 'python/bin/python3'
-                self.b.system_python = mock.Mock(return_value=str(python))
-                self.b.run = mock.Mock(side_effect=[
-                    subprocess.CompletedProcess([], 1),
-                    subprocess.CompletedProcess([], 0),
-                    subprocess.CompletedProcess([], 0 if repaired else 1),
-                ])
+                self.b.tools_python = mock.Mock(return_value=str(python))
+
+                def run(command, **kwargs):
+                    if command[0] == '/bin/uv':
+                        python.parent.mkdir(parents=True)
+                        python.touch()
+                        return subprocess.CompletedProcess(command, 1)
+                    if 'ensurepip' in command:
+                        return subprocess.CompletedProcess(command, 0)
+                    return subprocess.CompletedProcess(command, 0 if repaired and self.b.run.call_count == 4 else 1)
+
+                self.b.run = mock.Mock(side_effect=run)
                 self.b.failures.clear()
                 with mock.patch.dict(os.environ):
                     self.assertEqual(self.b.prepare_python_tools(), repaired)
-                self.assertEqual(self.b.run.call_args_list[1][0][0],
-                                 [str(python), '-m', 'ensurepip', '--upgrade'])
+                commands = [call[0][0] for call in self.b.run.call_args_list]
+                self.assertEqual(commands[0], ['/bin/uv', 'venv', '--python', '/usr/bin/python3.14',
+                                               '--seed', str(python.parent.parent)])
+                self.assertEqual(commands[2], [str(python), '-I', '-m', 'ensurepip', '--upgrade'])
                 self.assertEqual(bool(self.b.failures), not repaired)
 
     def test_python_interpreter_matrix(self):
@@ -183,7 +224,7 @@ class EnvironmentTests(unittest.TestCase):
             with self.subTest(distro=distro, version=version):
                 self.b.distro = {'id': distro, 'version': version}
                 with mock.patch.object(Path, 'exists', return_value=True):
-                    path = self.b.system_python()
+                    path = self.b.tools_python()
                 self.assertEqual(path, str(init.HOME / '.local/share/init/python/bin/python3')
                                  if isolated else '/usr/bin/python3')
 
@@ -241,24 +282,23 @@ class EnvironmentTests(unittest.TestCase):
         self.b.distro = {'id': 'kali'}
         self.assertEqual(self.b.docker_repository(), ('debian', 'trixie'))
 
-    def test_managed_python_repair_only_clears_broken_environment(self):
+    def test_managed_python_repair_preserves_existing_environment(self):
         self.b.distro = {'id': 'ubuntu', 'version': '18.04'}
-        self.b.install_uv = mock.Mock(return_value=True)
-        self.b.uv_executable = mock.Mock(return_value='/bin/uv')
+        self.b.install_uv = mock.Mock()
         self.b.update_managed_block = mock.Mock()
         with tempfile.TemporaryDirectory() as directory:
             python = Path(directory) / 'python/bin/python3'
             python.parent.mkdir(parents=True)
             python.touch()
-            self.b.system_python = mock.Mock(return_value=str(python))
-            self.b.run = mock.Mock(side_effect=[subprocess.CompletedProcess([], 1),
-                                               subprocess.CompletedProcess([], 0)])
-            with mock.patch.dict(os.environ):
-                self.assertTrue(self.b.prepare_python_tools())
-            command = self.b.run.call_args[0][0]
-            self.assertIn('--clear', command)
-            self.assertEqual(command[-1], str(python.parent.parent))
-            self.assertNotIn('sudo', self.b.run.call_args[1])
+            marker = python.parent.parent / 'keep'
+            marker.touch()
+            self.b.tools_python = mock.Mock(return_value=str(python))
+            self.b.run = mock.Mock(return_value=subprocess.CompletedProcess([], 1))
+            self.assertFalse(self.b.prepare_python_tools())
+            self.b.install_uv.assert_not_called()
+            self.b.update_managed_block.assert_not_called()
+            self.assertTrue(marker.is_file())
+            self.assertTrue(any('back it up' in failure for failure in self.b.failures))
 
     def test_ruby_batch_failure_recovers_only_failed_tool(self):
         self.b.distro = {'id': 'ubuntu', 'version': '24.04'}

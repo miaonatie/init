@@ -40,7 +40,7 @@ if sys.argv[1:] != ["--exercise"]:
     assert b.apt_install(["python3-pip", "python3-dev", "libffi-dev", "libssl-dev", "pkg-config"],
                          "Python build dependencies", required=True)
     assert b.prepare_python_tools()
-    python = b.system_python()
+    python = b.tools_python()
     b.install_python_tools()
     assert not b.failures, b.failures
     b.run([python, "-c", "import importlib; [importlib.import_module(m) for m in " + repr(init.PYTHON_IMPORTS) + "]"])

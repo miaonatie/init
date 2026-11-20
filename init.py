@@ -163,10 +163,6 @@ ALLOWED_INSTALLER_HOSTS = {
     "sh.rustup.rs",
 }
 
-PYTHON2_VERSION = "2.7.18"
-PYENV_URL = "https://github.com/pyenv/pyenv.git"
-PYTHON2_COMMAND_DIR = Path("/usr/local/bin")
-
 NVM_VERSION = "0.40.7"
 NVM_DIR = TOOLS_DIR / "nvm"
 NVM_URL = f"https://raw.githubusercontent.com/nvm-sh/nvm/v{NVM_VERSION}/install.sh"
@@ -577,7 +573,7 @@ class Bootstrap:
             if value not in current:
                 current.insert(0, value)
         if self.uses_managed_python():
-            managed = Path(self.system_python()).parent
+            managed = Path(self.tools_python()).parent
             if (managed / "python3").is_file() and os.access(managed / "python3", os.X_OK):
                 value = str(managed)
                 current = [value] + [path for path in current if path != value]
@@ -749,7 +745,7 @@ class Bootstrap:
         return available
 
     def planned_apt_packages(self) -> 'list[str]':
-        distro_packages = KALI_APT if self.distro["id"] == "kali" else []
+        distro_packages = [*KALI_APT, "python2"] if self.distro["id"] == "kali" else []
         i386 = I386_APT if self.arch in {"x86_64", "amd64"} else []
         return list(dict.fromkeys([*REQUIRED_APT, *DAILY_APT, *CTF_APT, *IOT_APT, *distro_packages, *i386]))
 
@@ -759,7 +755,6 @@ class Bootstrap:
             return 12, 18
         if (
             missing
-            or self.existing_python2() is None
             or not self.docker_ready()
             or not self.node_environment_available()
             or not self.rust_environment_available()
@@ -964,6 +959,7 @@ class Bootstrap:
         i386 = self.enable_i386()
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         self.apt_install(self.compatible_packages(REQUIRED_APT), "system and development packages", required=True)
+        self.install_system_python2()
         self.apt_install(
             self.compatible_packages([*DAILY_APT, *distro_packages], optional=True), "daily CLI tools", required=True
         )
@@ -1587,122 +1583,24 @@ unset _init_path_rest _init_path_result _init_path_entry'''
         else:
             self.failures.append("Docker installation failed verification")
 
-    def python2_prefix(self) -> Path:
-        return TOOLS_DIR / "pyenv" / "versions" / PYTHON2_VERSION
+    def install_system_python2(self) -> None:
+        self.apt_install(["python2"], "Python 2 compatibility", required=self.distro["id"] == "kali")
 
-    def valid_python2(self, executable: 'Path | str') -> bool:
-        result = self.run(
-            [str(executable), "--version"], check=False, capture=True, timeout=30
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        return result.returncode == 0 and output.strip().startswith("Python 2.7.")
-
-    def existing_python2(self) -> 'Path | None':
-        candidates = [shutil.which("python2"), str(self.python2_prefix() / "bin" / "python2.7")]
-        for candidate in candidates:
-            if candidate and Path(candidate).exists() and self.valid_python2(candidate):
-                return Path(candidate)
-        return None
-
-    def python2_pip_ready(self, executable: 'Path | str') -> bool:
-        result = self.run(
-            [str(executable), "-m", "pip", "--version"],
-            check=False,
-            capture=True,
-            timeout=30,
-        )
-        return result.returncode == 0 and "pip " in (result.stdout or "").lower()
-
-    def configure_python2_runtime(self, python2: Path) -> bool:
-        python2 = python2.resolve()
-        if not self.python2_pip_ready(python2):
-            self.info("Python 2 pip module is missing; bootstrapping it with ensurepip")
-            ensurepip = self.run(
-                [str(python2), "-m", "ensurepip", "--upgrade"],
-                check=False,
-                timeout=300,
-            )
-            if ensurepip.returncode != 0 or not self.python2_pip_ready(python2):
-                return False
-
-        for name in ("python2", "python2.7"):
-            destination = PYTHON2_COMMAND_DIR / name
-            try:
-                already_linked = destination.resolve() == python2
-            except OSError:
-                already_linked = False
-            if already_linked:
-                continue
-            link = self.run(
-                ["ln", "-sf", str(python2), str(destination)], sudo=True, check=False
-            )
-            if link.returncode != 0:
-                self.failures.append(f"Python 2 command link failed: {name}")
-                return False
-
-        pip2_wrapper = (
-            "#!/bin/sh\n"
-            f"exec {shlex.quote(str(python2))} -m pip \"$@\"\n"
-        )
-        if not self.install_command_wrapper(PYTHON2_COMMAND_DIR / "pip2", pip2_wrapper):
-            self.failures.append("Python 2 command installation failed: pip2")
-            return False
-
-        pip2_check = self.run(
-            [str(PYTHON2_COMMAND_DIR / "pip2"), "--version"],
-            check=False,
-            capture=True,
-            timeout=30,
-        )
-        if pip2_check.returncode != 0:
-            self.failures.append("Python 2 pip2 command failed verification")
-            return False
-        return True
-
-    def install_python2_legacy(self) -> None:
-        existing = self.existing_python2()
-        if existing is not None:
-            resolved = existing.resolve()
-            system_runtime_without_pip = (
-                Path("/usr") in resolved.parents
-                and not self.python2_pip_ready(resolved)
-            )
-            if system_runtime_without_pip:
-                self.warn(
-                    f"system Python 2 at {resolved} has no pip; Debian/Kali disables "
-                    "ensurepip, so the isolated pyenv runtime will be used directly"
-                )
-            elif self.configure_python2_runtime(existing):
-                self.ok(f"Python 2 legacy runtime and pip2: already configured ({existing})")
-                return
-            else:
-                self.warn(
-                    f"existing Python 2 at {existing} has no usable pip; "
-                    "installing the isolated pyenv runtime"
-                )
-        if not self.clone_or_update("pyenv", PYENV_URL):
-            self.failures.append("Python 2 legacy runtime installation failed")
-            return
-
-        pyenv = TOOLS_DIR / "pyenv" / "bin" / "pyenv"
-        env = {"PYENV_ROOT": str(TOOLS_DIR / "pyenv"), "CFLAGS": "-std=c11"}
-        result = self.run(
-            [str(pyenv), "install", "-s", PYTHON2_VERSION],
-            check=False,
-            timeout=1800,
-            env=env,
-        )
-        python2 = self.python2_prefix() / "bin" / "python2.7"
-        if result.returncode != 0 or not python2.exists() or not self.valid_python2(python2):
-            self.failures.append("Python 2 legacy runtime installation failed")
-            return
-        if not self.configure_python2_runtime(python2):
-            if not any("Python 2" in failure for failure in self.failures):
-                self.failures.append("Python 2 pip installation failed")
-            return
-        self.ok(
-            "Python 2.7.18 legacy runtime and pip2 installed without changing system Python"
-        )
+    def verify_system_python2(self) -> bool:
+        if (self.distro["id"] != "kali" and not self.package_installed("python2")
+                and not self.package_available("python2")):
+            self.skip_compat("python2", "unavailable in this release's APT repositories")
+            return True
+        python = "/usr/bin/python2"
+        result = self.run([python, "--version"], check=False, capture=True, timeout=30)
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        if result.returncode == 0 and output.startswith("Python 2.7."):
+            self.ok(f"{output}: {python}")
+            return True
+        message = f"verification failed: APT Python 2.7 is not working at {python}"
+        self.failures.append(message)
+        self.error(message)
+        return False
 
     def uses_managed_python(self) -> bool:
         # Isolate pip from APT-owned packages even when the system Python
@@ -1712,41 +1610,30 @@ unset _init_path_rest _init_path_result _init_path_entry'''
     def prepare_python_tools(self) -> bool:
         if not self.uses_managed_python():
             return True
-        if not self.install_uv():
-            return False
-        python = Path(self.system_python())
-        ready = python.is_file() and self.run(
-            [str(python), "-c", "import sys, pip; assert sys.version_info[:2] == (3, 12)"],
-            check=False, capture=True, timeout=30,
-        ).returncode == 0
+        python = Path(self.tools_python())
+        env_dir = python.parent.parent
+        probe = [str(python), "-I", "-c",
+                 "import sys, pip; assert sys.prefix != sys.base_prefix and sys.version_info[:2] >= (3, 12)"]
+        ready = python.is_file() and self.run(probe, check=False, capture=True, timeout=30).returncode == 0
         if not ready:
-            command = [self.uv_executable(), "venv", "--python", "3.12", "--seed"]
-            if python.parent.parent.exists():
-                self.warn("Repairing the managed Python 3.12 environment")
-                command.append("--clear")
-            result = self.run(
-                command + [str(python.parent.parent)],
-                check=False, timeout=600,
-            )
-            if result.returncode != 0:
-                # uv may create the venv successfully but fail fetching pip.
-                # CPython's bundled wheel can finish that bootstrap offline.
-                self.warn("Python environment setup failed; trying bundled pip offline")
-                seed = self.run(
-                    [str(python), "-m", "ensurepip", "--upgrade"],
-                    check=False, timeout=60,
-                )
-                probe = self.run(
-                    [str(python), "-c", "import sys, pip; assert sys.version_info[:2] == (3, 12)"],
-                    check=False, capture=True, timeout=30,
-                )
-                if seed.returncode != 0 or probe.returncode != 0:
-                    self.failures.append("isolated Python 3.12 environment installation failed")
+            if not env_dir.exists():
+                if not self.install_uv():
                     return False
-        # Only the interactive shell PATH changes; /usr/bin/python3 stays intact.
-        body = f'export PATH={shlex.quote(str(python.parent))}:"$PATH"'
-        for profile in (BASHRC, ZSHRC):
-            self.update_managed_block(profile, "# >>> init Python tools >>>", "# <<< init Python tools <<<", body)
+                self.run(
+                    [self.uv_executable(), "venv", "--python", self.python_venv_base(), "--seed", str(env_dir)],
+                    check=False, timeout=600,
+                )
+            # Never clear an existing environment to recover pip. If uv made
+            # the environment but failed to seed it, bundled ensurepip may work.
+            if not python.is_file():
+                self.failures.append(f"Python tool environment has no interpreter: {env_dir}; back it up before rebuilding")
+                return False
+            if self.run(probe, check=False, capture=True, timeout=30).returncode != 0:
+                self.run([str(python), "-I", "-m", "ensurepip", "--upgrade"], check=False, timeout=60)
+                if self.run(probe, check=False, capture=True, timeout=30).returncode != 0:
+                    self.failures.append(f"Python tool environment is unusable: {env_dir}; back it up before rebuilding")
+                    return False
+        self.configure_python_tools_shell(python)
         paths = os.environ.get("PATH", "").split(os.pathsep)
         os.environ["PATH"] = os.pathsep.join([str(python.parent)] + [p for p in paths if p != str(python.parent)])
         if not ready:
@@ -1754,8 +1641,30 @@ unset _init_path_rest _init_path_result _init_path_entry'''
         self.ok(f"Python CTF tools use {python}; system Python is preserved")
         return True
 
+    def configure_python_tools_shell(self, python: Path) -> None:
+        # Write over the old PATH block so existing installs migrate in place.
+        activate = shlex.quote(str(python.parent / "activate"))
+        body = "\n".join((
+            "ctf_env() {",
+            f"    if [ ! -r {activate} ]; then",
+            "        printf '%s\\n' 'CTF Python environment is unavailable.' >&2",
+            "        return 1",
+            "    fi",
+            f"    . {activate}",
+            "}",
+        ))
+        for profile in (BASHRC, ZSHRC):
+            self.update_managed_block(profile, "# >>> init Python tools >>>",
+                                      "# <<< init Python tools <<<", body)
+
+    def python_pip_env(self) -> 'dict[str, str]':
+        env = {"PIP_ROOT_USER_ACTION": "ignore"}
+        if not self.uses_managed_python():
+            env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
+        return env
+
     def install_python_tools(self) -> None:
-        python = self.system_python()
+        python = self.tools_python()
         probe_code = (
             "import importlib\n"
             f"modules = {PYTHON_IMPORTS!r}\n"
@@ -1801,7 +1710,7 @@ unset _init_path_rest _init_path_result _init_path_entry'''
             sudo=not self.uses_managed_python(),
             check=False,
             timeout=600,
-            env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+            env=self.python_pip_env(),
         )
         if result.returncode != 0:
             # A single incompatible package must not prevent all Pwn tools installing.
@@ -1811,7 +1720,7 @@ unset _init_path_rest _init_path_result _init_path_entry'''
                     command + [package],
                     sudo=not self.uses_managed_python(), check=False,
                     timeout=300,
-                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                    env=self.python_pip_env(),
                 )
                 if retry.returncode != 0:
                     self.failures.append(f"Python package installation failed: {package}")
@@ -1832,7 +1741,7 @@ unset _init_path_rest _init_path_result _init_path_entry'''
                     command + ["--force-reinstall", "--no-deps", package],
                     sudo=not self.uses_managed_python(), check=False,
                     timeout=300,
-                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                    env=self.python_pip_env(),
                 )
             broken = [
                 package for package, commands in PYTHON_COMMAND_PACKAGES.items()
@@ -1854,7 +1763,7 @@ unset _init_path_rest _init_path_result _init_path_entry'''
                     command + ["--force-reinstall", "--no-deps", package],
                     sudo=not self.uses_managed_python(), check=False,
                     timeout=300,
-                    env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                    env=self.python_pip_env(),
                 )
         if failed_modules:
             imports = self.run([python, "-c", probe_code], check=False, capture=True, timeout=60)
@@ -2133,7 +2042,19 @@ unset _init_path_rest _init_path_result _init_path_entry'''
                 "check that radare2 and libradare2-dev have matching versions"
             )
 
-    def system_python(self) -> str:
+    def python_venv_base(self) -> str:
+        """Reuse the distro interpreter when it meets the minimum version."""
+        system = Path("/usr/bin/python3")
+        if system.is_file():
+            result = self.run(
+                [str(system), "-I", "-S", "-c", "import sys; assert sys.version_info[:2] >= (3, 12)"],
+                check=False, capture=True, timeout=30,
+            )
+            if result.returncode == 0:
+                return str(system.resolve())
+        return "3.12"
+
+    def tools_python(self) -> str:
         if self.uses_managed_python():
             return str(HOME / ".local/share/init/python/bin/python3")
         return "/usr/bin/python3" if Path("/usr/bin/python3").exists() else "python3"
@@ -3646,7 +3567,7 @@ except gdb.error:
             return
 
         if not runtime_ready:
-            python = self.system_python()
+            python = self.tools_python()
             pip_base = [
                 python, "-m", "pip", "install",
                 "--disable-pip-version-check", *PIP_NETWORK_OPTIONS, "--upgrade",
@@ -3658,7 +3579,7 @@ except gdb.error:
                 sudo=not self.uses_managed_python(),
                 check=False,
                 timeout=300,
-                env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                env=self.python_pip_env(),
             )
             if dependencies.returncode != 0:
                 self.failures.append("glibc-all-in-one v2 dependency installation failed")
@@ -3671,7 +3592,7 @@ except gdb.error:
                 sudo=not self.uses_managed_python(),
                 check=False,
                 timeout=300,
-                env={"PIP_ROOT_USER_ACTION": "ignore", "PIP_BREAK_SYSTEM_PACKAGES": "1"},
+                env=self.python_pip_env(),
             )
             if editable.returncode != 0:
                 self.failures.append("glibc-all-in-one v2 editable installation failed")
@@ -3900,7 +3821,7 @@ except gdb.error:
     def glibc_aio_runtime_available(self) -> bool:
         if self._glibc_runtime_cache is not None:
             return self._glibc_runtime_cache
-        python = self.system_python()
+        python = self.tools_python()
         imports = self.run(
             [python, "-c", "import elftools, zstandard, glibc_aio"],
             check=False,
@@ -4204,7 +4125,6 @@ except gdb.error:
         return self.summary()
 
     def install_ctf_toolchain(self) -> None:
-        self.install_python2_legacy()
         if self.prepare_python_tools():
             self.install_python_tools()
             self.install_checksec_fallback()
@@ -4393,24 +4313,8 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        python2 = self.existing_python2()
-        if python2 is not None:
-            self.ok(f"Python 2.7 legacy runtime: {python2}")
-            pip2 = self.find_command(["pip2"])
-            if pip2 and self.python2_pip_ready(python2):
-                self.ok(f"Python 2 pip: {pip2}")
-            else:
-                ok_all = False
-                message = "verification failed: Python 2 pip2 command unavailable"
-                if message not in self.failures:
-                    self.failures.append(message)
-                self.error(message)
-        else:
+        if not self.verify_system_python2():
             ok_all = False
-            message = "verification failed: working Python 2.7 runtime not found"
-            if message not in self.failures:
-                self.failures.append(message)
-            self.error(message)
 
         if self.docker_ready():
             self.ok("Docker Engine, Buildx and Compose")
@@ -4421,7 +4325,7 @@ except gdb.error:
                 self.failures.append(message)
             self.error(message)
 
-        python = self.system_python()
+        python = self.tools_python()
         pip3 = self.run(
             [python, "-m", "pip", "--version"],
             check=False,
@@ -4652,7 +4556,7 @@ Usage:
                            Remove the legacy portable Pwndbg integration only
   python3 init.py --help   Show this help
 
-Ubuntu 18.04+ and current Kali use an isolated Python 3.12 for CTF tools. Missing optional APT tools are reported as skipped.
+Python tools use an isolated environment backed by system Python when it is\n3.12 or newer, with Python 3.12 as a fallback. Working environments are reused.\nPython 2 is installed from APT by default when available; no second runtime\nis built. Missing optional APT tools are reported as skipped.
 Ubuntu 18.04 skips current Node LTS; Ubuntu 18.04/20.04 keep plain system GDB
 instead of installing current Pwndbg. System Python and glibc are not replaced.
 

@@ -50,7 +50,8 @@ def exercise_languages(b):
         b.run(['javac', str(java)], capture=True, timeout=60)
         assert b.run(['java', '-cp', str(root), 'Hello'], capture=True).stdout == 'init-ok'
         assert b.run(['ruby', '-e', 'print "init-ok"'], capture=True).stdout == 'init-ok'
-        assert b.run(['python2', '-c', 'print("init-ok")'], capture=True).stdout.strip() == 'init-ok'
+        if 'python2' not in b.compat_skips:
+            assert b.run(['/usr/bin/python2', '-c', 'print("init-ok")'], capture=True).stdout.strip() == 'init-ok'
         if 'node' not in b.compat_skips:
             result = b.run_node_shell("nvm use --silent default >/dev/null\nnode -e 'process.stdout.write(\"init-ok\")'", capture=True)
             assert result.returncode == 0 and result.stdout == 'init-ok', result
@@ -65,10 +66,13 @@ def main():
     assert digest(system_python) == system_digest
     # Installer PATH alone is insufficient: test clean interactive shell startup.
     for shell in ('bash', 'zsh'):
-        b.run([shell, '-ic', 'command -v uv && command -v ROPgadget && command -v ropper'],
+        b.run([shell, '-ic', 'command -v uv && test "$(command -v python3)" = /usr/bin/python3 && '
+               'ctf_env && python3 -c "import sys; assert sys.prefix != sys.base_prefix and sys.version_info[:2] >= (3, 12)" && '
+               'command -v ROPgadget && command -v ropper && deactivate && '
+               'test "$(command -v python3)" = /usr/bin/python3'],
               env={'PATH': '/usr/bin:/bin'}, capture=True, timeout=60)
     exercise_languages(b)
-    python = b.system_python()
+    python = b.tools_python()
     b.run([python, str(Path(__file__).with_name('smoke_pwn.py')), '--exercise'])
     # Exercise real repair with metadata intact (pip upgrade alone is a no-op).
     for name in ('ROPgadget', 'ropper'):

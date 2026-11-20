@@ -149,12 +149,12 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess([], 0))
         self.bootstrap.update_managed_block = mock.Mock()
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE, "HOME", Path(directory)), mock.patch.dict(MODULE.os.environ):
-            python = Path(self.bootstrap.system_python())
+            python = Path(self.bootstrap.tools_python())
             python.parent.mkdir(parents=True)
             python.touch()
             self.assertTrue(self.bootstrap.prepare_python_tools())
             self.bootstrap.run.assert_called_once()
-            self.assertEqual(self.bootstrap.run.call_args[0][0][1], "-c")
+            self.assertEqual(self.bootstrap.run.call_args[0][0][1:3], ["-I", "-c"])
             self.assertEqual(MODULE.os.environ["PATH"].split(":")[0], str(python.parent))
             self.assertEqual(self.bootstrap.update_managed_block.call_count, 2)
 
@@ -169,7 +169,7 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap.install_python_tools()
         call = self.bootstrap.run.call_args_list[1]
         self.assertFalse(call[1]["sudo"])
-        self.assertEqual(call[0][0][0], self.bootstrap.system_python())
+        self.assertEqual(call[0][0][0], self.bootstrap.tools_python())
 
     def test_old_gdb_is_preserved_when_pwndbg_is_incompatible(self):
         self.bootstrap.distro = {"id": "ubuntu", "version": "18.04"}
@@ -380,7 +380,6 @@ class InstallerTests(unittest.TestCase):
     def test_managed_git_repositories_live_under_tools(self):
         self.assertEqual(MODULE.GLIBC_AIO_DIR, MODULE.TOOLS_DIR / "glibc-all-in-one")
         self.assertEqual(MODULE.LIBC_DATABASE_DIR, MODULE.TOOLS_DIR / "libc-database")
-        self.assertEqual(self.bootstrap.python2_prefix().parents[2], MODULE.TOOLS_DIR)
 
     def test_python_install_uses_managed_environment_without_sudo(self):
         probe_result = subprocess.CompletedProcess(["python3", "-c"], 1, stdout="", stderr="")
@@ -392,7 +391,7 @@ class InstallerTests(unittest.TestCase):
         command = install_call[0][0]
         self.assertNotIn("--user", command)
         self.assertNotIn("--break-system-packages", command)
-        self.assertEqual(install_call[1]["env"]["PIP_BREAK_SYSTEM_PACKAGES"], "1")
+        self.assertNotIn("PIP_BREAK_SYSTEM_PACKAGES", install_call[1]["env"])
         self.assertIn("--upgrade", command)
         self.assertNotIn("venv", command)
         self.assertFalse(install_call[1]["sudo"])
@@ -473,128 +472,37 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(all("--only-binary=lief" in command for command in commands))
         self.assertEqual(self.bootstrap.failures, ["Python package installation failed: lief"])
 
-    def test_python2_existing_runtime_is_not_reinstalled(self):
-        python2 = Path("/usr/bin/python2")
-        self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
-        self.bootstrap.python2_pip_ready = mock.Mock(return_value=True)
-        self.bootstrap.configure_python2_runtime = mock.Mock(return_value=True)
-        self.bootstrap.clone_or_update = mock.Mock()
-        self.bootstrap.install_python2_legacy()
-        self.bootstrap.configure_python2_runtime.assert_called_once_with(python2)
-        self.bootstrap.clone_or_update.assert_not_called()
+    def test_system_python2_install_uses_only_apt(self):
+        self.bootstrap.apt_install = mock.Mock()
+        for distro, required in (("kali", True), ("ubuntu", False)):
+            with self.subTest(distro=distro):
+                self.bootstrap.distro = {"id": distro}
+                self.bootstrap.install_system_python2()
+                self.bootstrap.apt_install.assert_called_with(
+                    ["python2"], "Python 2 compatibility", required=required)
 
-    def test_system_python2_without_pip_skips_disabled_ensurepip(self):
-        python2 = Path("/usr/bin/python2")
-        self.bootstrap.existing_python2 = mock.Mock(return_value=python2)
-        self.bootstrap.python2_pip_ready = mock.Mock(return_value=False)
-        self.bootstrap.configure_python2_runtime = mock.Mock()
-        self.bootstrap.clone_or_update = mock.Mock(return_value=False)
+    def test_system_python2_verifies_apt_runtime_without_pip(self):
+        self.bootstrap.distro = {"id": "kali"}
+        self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, stdout="", stderr="Python 2.7.18\n"))
+        self.assertTrue(self.bootstrap.verify_system_python2())
+        self.bootstrap.run.assert_called_once_with(
+            ["/usr/bin/python2", "--version"], check=False, capture=True, timeout=30)
 
-        self.bootstrap.install_python2_legacy()
+    def test_system_python2_missing_on_kali_fails_verification(self):
+        self.bootstrap.distro = {"id": "kali"}
+        self.bootstrap.run = mock.Mock(return_value=subprocess.CompletedProcess([], 127))
+        self.assertFalse(self.bootstrap.verify_system_python2())
+        self.assertIn("/usr/bin/python2", self.bootstrap.failures[-1])
 
-        self.bootstrap.configure_python2_runtime.assert_not_called()
-        self.bootstrap.clone_or_update.assert_called_once_with("pyenv", MODULE.PYENV_URL)
-
-    def test_python2_pyenv_install_never_changes_global_python(self):
-        with tempfile.TemporaryDirectory() as directory:
-            tools_dir = Path(directory)
-            (tools_dir / "pyenv" / "bin").mkdir(parents=True)
-            (tools_dir / "pyenv" / "bin" / "pyenv").touch()
-            runtime_bin = tools_dir / "pyenv" / "versions" / MODULE.PYTHON2_VERSION / "bin"
-            runtime_bin.mkdir(parents=True)
-            (runtime_bin / "python2.7").touch()
-            (runtime_bin / "pip2").touch()
-            self.bootstrap.existing_python2 = mock.Mock(return_value=None)
-            self.bootstrap.clone_or_update = mock.Mock(return_value=True)
-            self.bootstrap.valid_python2 = mock.Mock(return_value=True)
-            self.bootstrap.configure_python2_runtime = mock.Mock(return_value=True)
-            self.bootstrap.run = mock.Mock(
-                return_value=subprocess.CompletedProcess(["command"], 0, stdout="", stderr="")
-            )
-            with mock.patch.object(MODULE, "TOOLS_DIR", tools_dir):
-                self.bootstrap.install_python2_legacy()
-            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
-            self.assertTrue(any(command[1:3] == ["install", "-s"] for command in commands))
-            self.assertFalse(any("global" in command for command in commands))
-
-    def test_python2_runtime_creates_pip2_wrapper_from_pip_module(self):
-        with tempfile.TemporaryDirectory() as directory:
-            python2 = Path(directory) / "python2.7"
-            python2.touch()
-            wrapper_content = []
-
-            def run(command, **_kwargs):
-                if command[0] == "install":
-                    wrapper_content.append(Path(command[3]).read_text(encoding="utf-8"))
-                stdout = "pip 20.3.4 from test (python 2.7)\n"
-                return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
-
-            self.bootstrap.run = mock.Mock(side_effect=run)
-            self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
-            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
-            self.assertIn(
-                ["ln", "-sf", str(python2.resolve()), "/usr/local/bin/python2"],
-                commands,
-            )
-            self.assertTrue(
-                any(command[0:3] == ["install", "-m", "0755"] for command in commands)
-            )
-            self.assertEqual(len(wrapper_content), 1)
-            self.assertIn(str(python2.resolve()), wrapper_content[0])
-            self.assertIn('-m pip "$@"', wrapper_content[0])
-
-    def test_python2_runtime_does_not_rewrite_matching_commands(self):
-        with tempfile.TemporaryDirectory() as directory:
-            command_dir = Path(directory) / "bin"
-            command_dir.mkdir()
-            python2 = Path(directory) / "python2.7"
-            python2.touch()
-            for name in ("python2", "python2.7"):
-                (command_dir / name).symlink_to(python2)
-            pip2 = command_dir / "pip2"
-            pip2.write_text(
-                "#!/bin/sh\n"
-                f"exec {python2.resolve()} -m pip \"$@\"\n",
-                encoding="utf-8",
-            )
-            pip2.chmod(0o755)
-            self.bootstrap.python2_pip_ready = mock.Mock(return_value=True)
-            self.bootstrap.run = mock.Mock(
-                return_value=subprocess.CompletedProcess([str(pip2)], 0)
-            )
-
-            with mock.patch.object(MODULE, "PYTHON2_COMMAND_DIR", command_dir):
-                self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
-
-            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
-            self.assertFalse(any(command[0] in {"ln", "install"} for command in commands))
-
-    def test_python2_runtime_bootstraps_missing_pip_before_wrapper(self):
-        with tempfile.TemporaryDirectory() as directory:
-            python2 = Path(directory) / "python2.7"
-            python2.touch()
-            pip_probes = 0
-
-            def run(command, **_kwargs):
-                nonlocal pip_probes
-                if command[1:4] == ["-m", "pip", "--version"]:
-                    pip_probes += 1
-                    return subprocess.CompletedProcess(
-                        command,
-                        1 if pip_probes == 1 else 0,
-                        stdout="" if pip_probes == 1 else "pip 20.3.4\n",
-                        stderr="",
-                    )
-                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-            self.bootstrap.run = mock.Mock(side_effect=run)
-            self.assertTrue(self.bootstrap.configure_python2_runtime(python2))
-            commands = [call[0][0] for call in self.bootstrap.run.call_args_list]
-            self.assertIn(
-                [str(python2.resolve()), "-m", "ensurepip", "--upgrade"],
-                commands,
-            )
-            self.assertEqual(pip_probes, 2)
+    def test_system_python2_unavailable_on_ubuntu_is_skipped(self):
+        self.bootstrap.distro = {"id": "ubuntu"}
+        self.bootstrap.package_installed = mock.Mock(return_value=False)
+        self.bootstrap.package_available = mock.Mock(return_value=False)
+        self.bootstrap.run = mock.Mock()
+        self.assertTrue(self.bootstrap.verify_system_python2())
+        self.assertIn("python2", self.bootstrap.compat_skips)
+        self.bootstrap.run.assert_not_called()
 
     def test_docker_repository_targets_ubuntu_and_kali(self):
         self.bootstrap.distro = {
@@ -685,13 +593,12 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.bootstrap.installation_space_limits(), (12, 18))
 
         self.bootstrap.package_installed = mock.Mock(return_value=True)
-        self.bootstrap.existing_python2 = mock.Mock(return_value=Path("/usr/bin/python2"))
         self.bootstrap.docker_ready = mock.Mock(return_value=True)
         self.bootstrap.node_environment_available = mock.Mock(return_value=True)
         self.bootstrap.rust_environment_available = mock.Mock(return_value=True)
         self.assertEqual(self.bootstrap.installation_space_limits(), (1, 3))
 
-        self.bootstrap.existing_python2 = mock.Mock(return_value=None)
+        self.bootstrap.docker_ready.return_value = False
         self.assertEqual(self.bootstrap.installation_space_limits(), (4, 7))
 
     def test_progress_output_is_plain_text_when_not_tty(self):
@@ -754,14 +661,16 @@ class InstallerTests(unittest.TestCase):
         calls = self.bootstrap.apt_install.call_args_list
         self.assertEqual([call[0][1] for call in calls], [
             "system and development packages",
+            "Python 2 compatibility",
             "daily CLI tools",
             "CTF CLI tools",
             "32-bit development support",
         ])
         self.assertEqual(calls[0][0][0], MODULE.REQUIRED_APT)
-        self.assertEqual(calls[1][0][0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
-        self.assertEqual(calls[2][0][0], MODULE.CTF_APT)
-        self.assertEqual(calls[3][0][0], MODULE.I386_APT)
+        self.assertEqual(calls[1], mock.call(["python2"], "Python 2 compatibility", required=True))
+        self.assertEqual(calls[2][0][0], [*MODULE.DAILY_APT, *MODULE.KALI_APT])
+        self.assertEqual(calls[3][0][0], MODULE.CTF_APT)
+        self.assertEqual(calls[4][0][0], MODULE.I386_APT)
         self.bootstrap.install_fastfetch.assert_called_once_with()
         self.bootstrap.configure_vim.assert_called_once_with()
         self.bootstrap.configure_tmux.assert_called_once_with()
@@ -2124,7 +2033,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_ctf_toolchain_installs_uv_pwndbg_after_r2ghidra(self):
         names = [
-            "install_python2_legacy", "prepare_python_tools", "install_python_tools", "install_ruby_tools",
+            "prepare_python_tools", "install_python_tools", "install_ruby_tools",
             "install_node_environment", "install_go_environment", "install_rust_environment",
             "install_radare2", "install_r2ghidra", "install_pwndbg_environment",
             "install_helper_repositories", "repair_distro_python_commands",
