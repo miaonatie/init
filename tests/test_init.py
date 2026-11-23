@@ -472,6 +472,26 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(all("--only-binary=lief" in command for command in commands))
         self.assertEqual(self.bootstrap.failures, ["Python package installation failed: lief"])
 
+    def test_ropper_dependency_fix_is_preserved_when_retrying_package_install(self):
+        self.bootstrap.find_usable_command = mock.Mock(return_value="/usr/local/bin/tool")
+        self.bootstrap.run = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0, stdout="ropper\ncapstone\n"),
+            subprocess.CompletedProcess([], 1),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0, stdout=""),
+        ])
+        self.bootstrap.install_python_tools()
+
+        batch, ropper_retry, capstone_retry = [
+            call[0][0] for call in self.bootstrap.run.call_args_list[1:-1]
+        ]
+        requirement, = MODULE.PYTHON_PACKAGE_COMPAT_REQUIREMENTS["ropper"]
+        self.assertEqual(batch[-3:], [requirement, "ropper", "capstone"])
+        self.assertEqual(ropper_retry[-2:], [requirement, "ropper"])
+        self.assertNotIn(requirement, capstone_retry)
+        self.assertEqual(self.bootstrap.failures, [])
+
     def test_system_python2_install_uses_only_apt(self):
         self.bootstrap.apt_install = mock.Mock()
         for distro, required in (("kali", True), ("ubuntu", False)):

@@ -137,6 +137,17 @@ PYTHON_COMMAND_PACKAGES = {
 PYTHON_PACKAGES = list(dict.fromkeys([*PYTHON_IMPORT_PACKAGES, *PYTHON_COMMAND_PACKAGES]))
 PYTHON_IMPORTS = list(PYTHON_IMPORT_PACKAGES.values())
 
+# PyPI filebytes 0.10.2 still uses ast.Str at build time. Use the merged
+# upstream fix (sashs/filebytes#36) on Python 3.14+ until it is released.
+PYTHON_PACKAGE_COMPAT_REQUIREMENTS = {
+    "ropper": (
+        "filebytes @ https://codeload.github.com/sashs/filebytes/tar.gz/"
+        "ff7492d750140288e2c3ff25b8a648719be470ce"
+        "#sha256=38ccb58dc9d3d5076584232880208a08fc57e9db515d63f1f36e08a1579a922b"
+        " ; python_version >= '3.14'",
+    ),
+}
+
 RUBY_GEMS = ["one_gadget", "seccomp-tools", "zsteg"]
 
 HELPER_REPOS = {
@@ -1701,12 +1712,16 @@ unset _init_path_rest _init_path_result _init_path_entry'''
             return
         missing = list(dict.fromkeys(missing))
         command = [
-                python, "-m", "pip", "install",
-                "--disable-pip-version-check", *PIP_NETWORK_OPTIONS,
-                "--only-binary=lief", "--upgrade",
+            python, "-m", "pip", "install",
+            "--disable-pip-version-check", *PIP_NETWORK_OPTIONS,
+            "--only-binary=lief", "--upgrade",
         ]
+        requirements = {
+            package: [*PYTHON_PACKAGE_COMPAT_REQUIREMENTS.get(package, ()), package]
+            for package in missing
+        }
         result = self.run(
-            command + missing,
+            command + [requirement for group in requirements.values() for requirement in group],
             sudo=not self.uses_managed_python(),
             check=False,
             timeout=600,
@@ -1715,9 +1730,9 @@ unset _init_path_rest _init_path_result _init_path_entry'''
         if result.returncode != 0:
             # A single incompatible package must not prevent all Pwn tools installing.
             self.warn("Python package batch failed; retrying packages independently")
-            for package in missing:
+            for package, group in requirements.items():
                 retry = self.run(
-                    command + [package],
+                    command + group,
                     sudo=not self.uses_managed_python(), check=False,
                     timeout=300,
                     env=self.python_pip_env(),
