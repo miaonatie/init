@@ -1,8 +1,14 @@
 # Emulation/debug only: no legacy analyzer/Chrome or host PostgreSQL dependency.
 FROM ubuntu:20.04
 ENV DEBIAN_FRONTEND=noninteractive USER=root
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git wget curl python3 python3-pip python3-setuptools python3-magic \
+# The Ubuntu base image needs a CA bundle before APT can use HTTPS.
+RUN apt_retry() { apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 "$@"; } \
+    && apt_retry update \
+    && apt_retry install -y --no-install-recommends ca-certificates \
+    && sed -i 's|http://|https://|g' /etc/apt/sources.list \
+    && apt_retry update \
+    && apt_retry install -y --no-install-recommends \
+    git wget curl python3 python3-pip python3-setuptools python3-magic \
     python3-psycopg2 python3-lzo postgresql postgresql-client \
     build-essential patch liblzma-dev liblzo2-dev zlib1g-dev liblz4-dev \
     file binutils bc psmisc ruby telnet socat net-tools iputils-ping iptables iproute2 \
