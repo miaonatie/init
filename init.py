@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Set up the distribution's Python and common libraries with APT."""
+"""Install and verify system packages for the lab with APT."""
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import time
 
 
 PYTHON = "/usr/bin/python3"
@@ -20,74 +22,155 @@ LIBRARIES = {
     "python3-sympy": "sympy",
     "python3-yaml": "yaml",
 }
-PACKAGES = ("python3", "python3-dev", *LIBRARIES)
+PYTHON_PACKAGES = ("python3", "python3-dev", *LIBRARIES)
+PACKAGE_GROUPS = {
+    "System Python": (*PYTHON_PACKAGES, PYTHON_ALIAS),
+    "Shell and everyday tools": (
+        "ca-certificates", "curl", "wget", "git", "rsync", "openssh-client",
+        "zsh", "bash-completion", "shellcheck", "vim", "nano", "tmux", "tree",
+        "bat", "fd-find", "ripgrep", "fzf", "zoxide", "duf", "btop", "htop", "ncdu", "jq", "yq",
+    ),
+    "Build and development tools": (
+        "build-essential", "pkg-config", "clang", "llvm", "lld", "cmake", "ninja-build", "meson",
+        "autoconf", "automake", "libtool", "gawk", "bison", "flex", "gettext", "patch",
+        "libssl-dev", "libffi-dev", "zlib1g-dev", "libbz2-dev", "liblzma-dev", "libsqlite3-dev",
+    ),
+    "Binary inspection and debugging": (
+        "file", "binutils", "elfutils", "xxd", "gdb", "gdb-multiarch", "strace", "ltrace",
+        "patchelf", "nasm", "valgrind", "qemu-user",
+    ),
+    "Archives, media and file forensics": (
+        "unzip", "zip", "xz-utils", "zstd", "tar", "gzip", "bzip2", "7zip", "cpio", "cabextract",
+        "squashfs-tools", "libimage-exiftool-perl", "pngcheck", "sleuthkit", "sqlite3", "qpdf",
+        "poppler-utils", "mediainfo", "ffmpeg", "sox", "tesseract-ocr", "qrencode", "zbar-tools",
+    ),
+}
+PACKAGES = tuple(package for group in PACKAGE_GROUPS.values() for package in group)
+COMMAND_CHECKS = {
+    "git": ("git", "--version"),
+    "curl": ("curl", "--version"),
+    "tmux": ("tmux", "-V"),
+    "ripgrep": ("rg", "--version"),
+    "jq": ("jq", "--version"),
+    "build-essential": ("gcc", "--version"),
+    "clang": ("clang", "--version"),
+    "cmake": ("cmake", "--version"),
+    "ninja-build": ("ninja", "--version"),
+    "file": ("file", "--version"),
+    "binutils": ("readelf", "--version"),
+    "gdb": ("gdb", "-nx", "--version"),
+    "strace": ("strace", "--version"),
+    "qemu-user": ("qemu-aarch64", "--version"),
+    "libimage-exiftool-perl": ("exiftool", "-ver"),
+    "sqlite3": ("sqlite3", "--version"),
+    "qpdf": ("qpdf", "--version"),
+    "ffmpeg": ("ffmpeg", "-version"),
+}
 OLD_ACTIVATION = re.compile(
     rb"^# >>> init Python tools >>>\r?\n.*?^# <<< init Python tools <<<(?:\r?\n|\Z)",
     re.MULTILINE | re.DOTALL,
 )
 
 
-def missing_packages():
+def color(text, code):
+    if sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb":
+        return "\033[{}m{}\033[0m".format(code, text)
+    return text
+
+
+def status(label, message, code):
+    print("  {} {}".format(color("[{}]".format(label), code), message), flush=True)
+
+
+def installed_packages():
     result = subprocess.run(
-        ["dpkg-query", "-W", "-f=${db:Status-Status}\t${Package}\n", *PACKAGES, PYTHON_ALIAS],
+        ["dpkg-query", "-W", "-f=${db:Status-Status}\t${Package}\n", *PACKAGES],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         universal_newlines=True,
     )
-    installed = {line.split("\t", 1)[1] for line in result.stdout.splitlines() if line.startswith("installed\t")}
-    return [package for package in PACKAGES if package not in installed], PYTHON_ALIAS not in installed
+    return {line.split("\t", 1)[1] for line in result.stdout.splitlines() if line.startswith("installed\t")}
 
 
-def alias_available():
+def available_packages(packages):
+    if not packages:
+        return set()
     result = subprocess.run(
-        ["apt-cache", "--no-all-versions", "show", PYTHON_ALIAS],
+        ["apt-cache", "--no-all-versions", "show", *packages],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        universal_newlines=True,
     )
-    return result.returncode == 0 and bool(result.stdout.strip())
+    return {line[9:] for line in result.stdout.splitlines() if line.startswith("Package: ")}
 
 
 def install_packages():
-    missing, alias_missing = missing_packages()
+    installed = installed_packages()
+    missing = [package for package in PACKAGES if package not in installed]
+    required = set(PYTHON_PACKAGES)
     apt = ["sudo"] if os.geteuid() else []
-    apt += ["apt-get", "-o", "Acquire::Retries=2"]
-    if missing or (alias_missing and alias_available()):
-        subprocess.run([*apt, "update"], check=True)
-        if alias_missing and alias_available():
-            missing.append(PYTHON_ALIAS)
+    apt += ["apt-get", "-o", "Acquire::Retries=2", "-o", "DPkg::Lock::Timeout=60"]
+    available = set()
+    if required.intersection(missing) or available_packages(missing):
+        status("update", "APT package indexes", "36")
+        subprocess.run([*apt, "-o", "APT::Update::Error-Mode=any", "update"], check=True)
+        available = available_packages(missing)
 
-    print("APT packages", flush=True)
-    for package in (*PACKAGES, PYTHON_ALIAS):
-        if package in missing:
-            status = "install"
-        elif package == PYTHON_ALIAS and alias_missing:
-            status = "unavailable"
-        else:
-            status = "installed"
-        print("  [{}] {}".format(status, package), flush=True)
-    if missing:
-        subprocess.run([*apt, "install", "-y", "--no-install-recommends", *missing], check=True)
+    pending = [package for package in missing if package in available or package in required]
+    for title, packages in PACKAGE_GROUPS.items():
+        print(color(title, "1;34"), flush=True)
+        for package in packages:
+            if package in installed:
+                status("installed", package, "32")
+            elif package in pending:
+                status("install", package, "36")
+            else:
+                status("unavailable", package, "33")
+    if pending:
+        subprocess.run([*apt, "install", "-y", "--no-remove", "--no-install-recommends", *pending], check=True)
+        installed = installed_packages()
+        if not set(pending).issubset(installed):
+            raise RuntimeError("APT did not install: " + ", ".join(sorted(set(pending) - installed)))
+    return installed
+
+
+def check_command(label, command, show_output=False):
+    try:
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                universal_newlines=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        status("failed", "{}: {}".format(label, error), "31")
+        return False
+    lines = result.stdout.strip().splitlines()
+    if result.returncode:
+        detail = lines[-1] if lines else "exit {}".format(result.returncode)
+        status("failed", "{}: {}".format(label, detail), "31")
+        return False
+    if show_output and lines:
+        label += " · " + lines[0]
+    status("ok", label, "32")
+    return True
 
 
 def verify_python():
-    print("System Python checks", flush=True)
-    probe = """
-import importlib
-import sys
+    checks = [check_command(PYTHON, [PYTHON, "--version"], show_output=True)]
+    for module in LIBRARIES.values():
+        checks.append(check_command("import " + module, [PYTHON, "-I", "-c", "import " + module]))
+    return all(checks)
 
-print("  [ok] Python {} ({})".format(sys.version.split()[0], sys.executable))
-failed = False
-for module in sys.argv[1:]:
-    try:
-        importlib.import_module(module)
-    except Exception as error:
-        print("  [failed] import {}: {}".format(module, error))
-        failed = True
-    else:
-        print("  [ok] import {}".format(module))
-sys.exit(failed)
-"""
-    return subprocess.run([PYTHON, "-I", "-c", probe, *LIBRARIES.values()]).returncode == 0
+
+def verify_tools(installed):
+    checks = []
+    for package, (command, *args) in COMMAND_CHECKS.items():
+        if package not in installed:
+            continue
+        executable = shutil.which(command, path="/usr/bin:/bin:/usr/sbin:/sbin")
+        if executable is None:
+            status("failed", "{} missing from the system PATH".format(command), "31")
+            checks.append(False)
+        else:
+            checks.append(check_command(command, [executable, *args], show_output=True))
+    return all(checks)
 
 
 def remove_old_activation(home):
@@ -108,17 +191,22 @@ def main(args):
         print("Usage: python3 init.py", file=sys.stderr)
         return 2
 
+    started = time.monotonic()
     try:
-        install_packages()
-        if not verify_python():
-            print("System Python verification failed.", file=sys.stderr)
+        print(color("[1/2] Install system packages", "1;34"), flush=True)
+        installed = install_packages()
+        print(color("\n[2/2] Verify system tools and Python", "1;34"), flush=True)
+        python_ok = verify_python()
+        tools_ok = verify_tools(installed)
+        if not (python_ok and tools_ok):
+            status("failed", "Lab verification failed", "31")
             return 1
         remove_old_activation(Path.home())
-    except (OSError, subprocess.CalledProcessError) as error:
-        print("System Python setup failed: {}".format(error), file=sys.stderr)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        status("failed", "Lab setup: {}".format(error), "31")
         return 1
 
-    print("System Python is ready at {}.".format(PYTHON))
+    status("ok", "{} system packages ready in {:.1f}s".format(len(installed), time.monotonic() - started), "32")
     return 0
 
 
