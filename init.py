@@ -71,6 +71,18 @@ DAILY_APT = [
 
 KALI_APT = ["gdu"]
 
+SYSTEM_PYTHON_APT = {
+    "python3-pip": "pip",
+    "python3-setuptools": "setuptools",
+    "python3-wheel": "wheel",
+    "python3-ipython": "IPython",
+    "python3-magic": "magic",
+    "python3-pil": "PIL",
+    "python3-requests": "requests",
+    "python3-sympy": "sympy",
+    "python3-yaml": "yaml",
+}
+
 CTF_APT = [
     "apktool",
     "steghide", "stegseek", "binwalk", "libimage-exiftool-perl", "pngcheck",
@@ -705,7 +717,7 @@ class Bootstrap:
             raise RuntimeError("sudo is required. Install sudo first, or run from a root shell.")
         self.run(["sudo", "-v"])
 
-    def preflight(self) -> None:
+    def preflight_apt(self) -> None:
         if sys.platform != "linux":
             raise RuntimeError("this installer supports Linux and WSL only")
         if not self.command_exists("apt-get") or not self.command_exists("dpkg-query"):
@@ -716,6 +728,9 @@ class Bootstrap:
                 f"(supported: Ubuntu 18.04+ and current Kali)"
             )
         self.require_sudo()
+
+    def preflight(self) -> None:
+        self.preflight_apt()
         free = shutil.disk_usage(HOME).free
         free_gib = free / (1024 ** 3)
         minimum_gib, recommended_gib = self.installation_space_limits()
@@ -948,7 +963,7 @@ class Bootstrap:
                     (self.failures if required else self.skipped).append(message)
         return ok_all
 
-    def install_system_foundation(self) -> None:
+    def enable_ubuntu_universe(self) -> None:
         if self.distro["id"] == "ubuntu":
             if self.ubuntu_universe_enabled():
                 self.ok("Ubuntu universe repository: already enabled")
@@ -967,6 +982,9 @@ class Bootstrap:
                 if result.returncode != 0:
                     self.failures.append("failed to enable the Ubuntu universe repository")
                 self.apt_updated = False
+
+    def install_system_foundation(self) -> None:
+        self.enable_ubuntu_universe()
         i386 = self.enable_i386()
         distro_packages = KALI_APT if self.distro["id"] == "kali" else []
         self.apt_install(self.compatible_packages(REQUIRED_APT), "system and development packages", required=True)
@@ -1593,6 +1611,22 @@ unset _init_path_rest _init_path_result _init_path_entry'''
             self.ok("Docker Engine, Buildx and Compose installed")
         else:
             self.failures.append("Docker installation failed verification")
+
+    def system_python_only(self) -> int:
+        self.preflight_apt()
+        self.enable_ubuntu_universe()
+        packages = self.compatible_packages(["python3", "python3-dev", "python-is-python3", *SYSTEM_PYTHON_APT])
+        if self.apt_install(packages, "system Python and libraries", required=True):
+            python = "/usr/bin/python3"
+            imports = "import " + ", ".join(SYSTEM_PYTHON_APT.values())
+            if self.executable_usable(python, ["-I", "-c", imports]):
+                for profile in (BASHRC, ZSHRC):
+                    if self.remove_managed_block(profile, "# >>> init Python tools >>>", "# <<< init Python tools <<<"):
+                        self.ok(f"removed the old Python activation block from {profile}")
+                self.ok(f"system Python imports verified with {python}")
+            else:
+                self.failures.append(f"system Python import check failed: {self._probe_errors[python]}")
+        return self.summary(environment="System Python")
 
     def install_system_python2(self) -> None:
         self.apt_install(["python2"], "Python 2 compatibility", required=self.distro["id"] == "kali")
@@ -4520,7 +4554,7 @@ except gdb.error:
 
         return self.verify_iot() and ok_all
 
-    def summary(self) -> int:
+    def summary(self, *, environment: str = "CTF environment") -> int:
         elapsed = self.format_duration(time.monotonic() - self.started_monotonic)
         if self.skipped:
             print("Skipped:")
@@ -4532,7 +4566,7 @@ except gdb.error:
                 print(f"  - {item}")
             self.error(f"completed with {len(self.failures)} failure(s) in {elapsed}")
             return 1
-        self.ok(f"CTF environment ready in {elapsed}")
+        self.ok(f"{environment} ready in {elapsed}")
         return 0
 
     def install(self) -> int:
@@ -4564,6 +4598,8 @@ def help_text() -> str:
 Usage:
   python3 init.py          Initialize and verify the CTF environment
   python3 init.py --check  Check the environment without installing tools
+  python3 init.py --system-python
+                           Install common Python libraries with APT and remove the old shell activation hook
   python3 init.py --iot    Install/repair only the IoT firmware environment
   python3 init.py --iot-check
                            Check only the IoT environment (read-only)
@@ -4589,13 +4625,15 @@ def main(argv: 'list[str]') -> int:
     if argv in (["-h"], ["--help"]):
         print(help_text())
         return 0
-    if argv not in ([], ["--check"], ["--iot"], ["--iot-check"],
+    if argv not in ([], ["--check"], ["--system-python"], ["--iot"], ["--iot-check"],
                     ["--remove-portable-pwndbg"]):
         print("unknown arguments: " + " ".join(argv), file=sys.stderr)
         print(help_text(), file=sys.stderr)
         return 2
     bootstrap = Bootstrap()
     try:
+        if argv == ["--system-python"]:
+            return bootstrap.system_python_only()
         if argv in (["--iot"], ["--iot-check"]):
             return bootstrap.iot_only(check=argv == ["--iot-check"])
         if argv == ["--check"]:

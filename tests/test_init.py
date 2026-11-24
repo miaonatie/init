@@ -22,6 +22,35 @@ class InstallerTests(unittest.TestCase):
         self.bootstrap = MODULE.Bootstrap()
         self.bootstrap.distro = {"id": "ubuntu", "version": "24.04", "codename": "noble", "ubuntu_codename": "noble", "name": "Ubuntu"}
 
+    def test_system_python_mode_removes_activation_only_after_imports_pass(self):
+        bootstrap = self.bootstrap
+        bootstrap.preflight_apt = mock.Mock()
+        bootstrap.enable_ubuntu_universe = mock.Mock()
+        bootstrap.apt_install = mock.Mock(return_value=True)
+        bootstrap.executable_usable = mock.Mock(side_effect=[False, True, True])
+        bootstrap._probe_errors["/usr/bin/python3"] = "missing module"
+
+        with tempfile.TemporaryDirectory() as directory:
+            profiles = [Path(directory) / filename for filename in (".bashrc", ".zshrc")]
+            previous = (
+                "# keep this setting\n\n# >>> init Python tools >>>\n"
+                "ctf_env() { :; }\n# <<< init Python tools <<<\n"
+            )
+            for profile in profiles:
+                profile.write_text(previous, encoding="utf-8")
+            with mock.patch.object(MODULE, "BASHRC", profiles[0]), mock.patch.object(MODULE, "ZSHRC", profiles[1]):
+                self.assertEqual(bootstrap.system_python_only(), 1)
+                self.assertEqual([profile.read_text() for profile in profiles], [previous, previous])
+                bootstrap.failures.clear()
+                for _ in range(2):
+                    self.assertEqual(bootstrap.system_python_only(), 0)
+                    self.assertEqual([profile.read_text() for profile in profiles], ["# keep this setting\n"] * 2)
+
+        command, arguments = bootstrap.executable_usable.call_args[0]
+        self.assertEqual(command, "/usr/bin/python3")
+        self.assertEqual(arguments[:2], ["-I", "-c"])
+        self.assertIn("requests", arguments[2])
+
     def test_user_path_profiles_find_later_installed_tools_and_are_idempotent(self):
         with tempfile.TemporaryDirectory(prefix="init home ") as directory:
             home = Path(directory)
