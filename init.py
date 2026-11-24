@@ -193,7 +193,8 @@ def installed_packages():
         ["dpkg-query", "-W", "-f=${db:Status-Status}\t${Package}\n", *PACKAGES, *PACKAGE_ALTERNATIVES.values()],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        universal_newlines=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return {line.split("\t", 1)[1] for line in result.stdout.splitlines() if line.startswith("installed\t")}
 
@@ -205,7 +206,8 @@ def available_packages(packages):
         ["apt-cache", "--no-all-versions", "show", *packages],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
-        universal_newlines=True,
+        encoding="utf-8",
+        errors="replace",
     )
     return {line[9:] for line in result.stdout.splitlines() if line.startswith("Package: ")}
 
