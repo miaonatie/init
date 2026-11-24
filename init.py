@@ -27,7 +27,7 @@ LIBRARIES = {
 PYTHON_PACKAGES = ("python3", "python3-dev", *LIBRARIES)
 EXTRA_LIBRARIES = {"python3-pyelftools": "elftools", "python3-zstandard": "zstandard", "python3-gmpy2": "gmpy2"}
 FOUNDATION = {
-    "System Python": (*PYTHON_PACKAGES, PYTHON_ALIAS),
+    "System Python": (*PYTHON_PACKAGES, *EXTRA_LIBRARIES, PYTHON_ALIAS),
     "Shell and everyday tools": (
         "ca-certificates", "gnupg", "curl", "wget", "git", "rsync", "openssh-client",
         "zsh", "bash-completion", "shellcheck", "vim", "nano", "tmux", "tree",
@@ -47,7 +47,7 @@ LAB_TOOLS = {
     ),
     "System language toolchains": (
         "perl", "ruby-full", "bundler", "default-jdk-headless", "nodejs", "npm",
-        "golang-go", "rustc", "cargo", "rustfmt", *EXTRA_LIBRARIES,
+        "golang-go", "rustc", "cargo", "rustfmt",
     ),
     "Binary inspection and debugging": (
         "file", "binutils", "elfutils", "xxd", "gdb", "gdb-multiarch", "strace", "ltrace",
@@ -301,6 +301,9 @@ def verify_python(installed):
     modules = [*LIBRARIES.values(), *(module for package, module in EXTRA_LIBRARIES.items() if package in installed)]
     for module in modules:
         checks.append(check_command("import " + module, [PYTHON, "-I", "-c", "import " + module]))
+    for package, module in EXTRA_LIBRARIES.items():
+        if package not in installed:
+            status("skipped", "import {} ({} is not installed)".format(module, package), "33")
     return all(checks)
 
 
@@ -361,17 +364,22 @@ def configure_shell_defaults(home, installed):
 
 
 def main(args):
-    if args:
-        print("Usage: python3 init.py", file=sys.stderr)
+    check_python_only = args == ["--check-python"]
+    if args and not check_python_only:
+        print("Usage: python3 init.py [--check-python]", file=sys.stderr)
         return 2
 
     started = time.monotonic()
     try:
-        stage(1, "Environment check")
+        if not check_python_only:
+            stage(1, "Environment check")
         preflight()
+        installed = installed_packages()
+        if check_python_only:
+            return 0 if verify_python(installed) else 1
+
         apt = ["sudo"] if os.geteuid() else []
         apt += ["apt-get", "-o", "Acquire::Retries=2", "-o", "DPkg::Lock::Timeout=60"]
-        installed = installed_packages()
         available = refresh_index(apt, installed)
 
         stage(2, "System foundation")

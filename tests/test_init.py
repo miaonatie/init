@@ -40,6 +40,29 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(init.main(["--system-python"]), 2)
         install.assert_not_called()
 
+    def test_check_python_is_read_only_and_returns_the_verification_result(self):
+        installed = {"python3", "python3-pyelftools"}
+        with mock.patch.object(init, "preflight"), \
+                mock.patch.object(init, "installed_packages", return_value=installed), \
+                mock.patch.object(init, "verify_python", side_effect=[True, False]) as verify, \
+                mock.patch.object(init, "refresh_index") as refresh, \
+                mock.patch.object(init, "install_packages") as install, \
+                mock.patch.object(init, "verify_tools") as verify_tools, \
+                mock.patch.object(init, "configure_shell_defaults") as configure:
+            self.assertEqual(init.main(["--check-python"]), 0)
+            self.assertEqual(init.main(["--check-python"]), 1)
+        self.assertEqual(verify.call_args_list, [mock.call(installed), mock.call(installed)])
+        for operation in (refresh, install, verify_tools, configure):
+            operation.assert_not_called()
+
+    def test_system_python_checks_installed_optional_libraries_and_reports_missing_ones(self):
+        output = StringIO()
+        with redirect_stdout(output), mock.patch.object(init, "check_command", return_value=True) as check:
+            self.assertTrue(init.verify_python({"python3-pyelftools"}))
+        check.assert_any_call("import elftools", [init.PYTHON, "-I", "-c", "import elftools"])
+        self.assertNotIn("import zstandard", [call[0][0] for call in check.call_args_list])
+        self.assertIn("[skipped] import zstandard (python3-zstandard is not installed)", output.getvalue())
+
     def test_failed_import_check_keeps_old_activation(self):
         with mock.patch.object(init, "preflight"), \
                 mock.patch.object(init, "installed_packages", return_value=set()), \
