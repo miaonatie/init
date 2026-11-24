@@ -23,11 +23,15 @@ RUN wget -q -t 3 -T 30 https://github.com/ReFirmLabs/binwalk/archive/refs/tags/v
     && cd /tmp/binwalk-2.3.4 && python3 setup.py install \
     && rm -rf /tmp/binwalk*
 # Vendor SquashFS variants; GCC 10's -fno-common otherwise breaks this old source.
+# Ubuntu archives the original SquashFS 4.3 release tarball byte-for-byte.
 RUN git clone https://github.com/devttys0/sasquatch.git /tmp/sasquatch \
     && cd /tmp/sasquatch && git checkout bd864a1b037bf57ca7d64a292a60ba0d6459611f \
     && sed -i 's/ -Werror/ -fcommon/g' patches/patch0.txt \
-    && sed -i 's/wget https:/wget -t 3 -T 30 https:/' build.sh \
-    && ./build.sh && test -x /usr/local/bin/sasquatch && rm -rf /tmp/sasquatch
+    && curl -fsSL --retry 3 --connect-timeout 15 --max-time 60 \
+        https://archive.ubuntu.com/ubuntu/pool/main/s/squashfs-tools/squashfs-tools_4.3.orig.tar.gz \
+        -o squashfs4.3.tar.gz \
+    && echo '0d605512437b1eb800b4736791559295ee5f60177e102e4d4ccd0ee241a5f3f6  squashfs4.3.tar.gz' | sha256sum -c - \
+    && bash -e ./build.sh && test -x /usr/local/bin/sasquatch && rm -rf /tmp/sasquatch
 RUN python3 -m pip install --no-cache-dir 'ubi_reader==0.8.5' 'jefferson==0.4.5'
 COPY FirmAE /opt/FirmAE
 WORKDIR /opt/FirmAE
