@@ -165,7 +165,11 @@ def color(text, code):
 
 
 def status(label, message, code):
-    print("  {} {}".format(color("[{}]".format(label), code), message), flush=True)
+    line = "  {} {}".format(color("[{}]".format(label), code), message)
+    encoding = sys.stdout.encoding
+    if encoding:
+        line = line.encode(encoding, errors="backslashreplace").decode(encoding)
+    print(line, flush=True)
 
 
 def stage(number, name):
@@ -181,7 +185,7 @@ def preflight():
     os_release = Path("/etc/os-release")
     release_lines = os_release.read_text(encoding="utf-8").splitlines() if os_release.is_file() else []
     name = next((line.partition("=")[2].strip('"') for line in release_lines if line.startswith("PRETTY_NAME=")), "Linux")
-    status("ok", "{} · {} · system Python {}".format(name, platform.machine(), PYTHON), "32")
+    status("ok", "{} - {} - system Python {}".format(name, platform.machine(), PYTHON), "32")
 
 
 def installed_packages():
@@ -252,7 +256,7 @@ def install_packages(groups, apt, installed, available):
 def check_command(label, command, show_output=False):
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                universal_newlines=True, timeout=20,
+                                encoding="utf-8", errors="replace", timeout=20,
                                 env={**os.environ, "PATH": SYSTEM_PATH, "GOTOOLCHAIN": "local"})
     except (OSError, subprocess.TimeoutExpired) as error:
         status("failed", "{}: {}".format(label, error), "31")
@@ -263,7 +267,7 @@ def check_command(label, command, show_output=False):
         status("failed", "{}: {}".format(label, detail), "31")
         return False
     if show_output and lines:
-        label += " · " + lines[0]
+        label += " - " + lines[0]
     status("ok", label, "32")
     return True
 
