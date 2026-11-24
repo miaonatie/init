@@ -105,6 +105,57 @@ OLD_ACTIVATION = re.compile(
     rb"^# >>> init Python tools >>>\r?\n.*?^# <<< init Python tools <<<(?:\r?\n|\Z)",
     re.MULTILINE | re.DOTALL,
 )
+NVM_STARTUP = re.compile(
+    rb'^([ \t]*\[ -s "\$NVM_DIR/nvm\.sh" \] && (?:\\?\.|source) "\$NVM_DIR/nvm\.sh")'
+    rb'([ \t]*(?:#[^\r\n]*)?)(?=\r?$)',
+    re.MULTILINE,
+)
+RUSTUP_STARTUP = re.compile(
+    rb'^(# >>> init rustup >>>)(\r?\n)\[ -f "\$HOME/\.cargo/env" \] && \. "\$HOME/\.cargo/env"\r?\n'
+    rb'(?=# <<< init rustup <<<\r?$)',
+    re.MULTILINE,
+)
+CARGO_FALLBACK = b'''if [ -d "${CARGO_HOME:-$HOME/.cargo}/bin" ]; then
+    case ":$PATH:" in
+        *":${CARGO_HOME:-$HOME/.cargo}/bin:"*) ;;
+        *) export PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin" ;;
+    esac
+fi
+'''
+SYSTEM_TOOLS = re.compile(
+    rb"^# >>> init system tools >>>\r?\n.*?^# <<< init system tools <<<(?:\r?\n|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def system_tool_path(node, rust):
+    rules = []
+    if node:
+        rules.append(b'        "$HOME"/.nvm/versions/node/*/bin|"$HOME"/tools/nvm/versions/node/*/bin|'
+                     b'"${NVM_DIR:-$HOME/.nvm}"/versions/node/*/bin|"${NVM_BIN:-/dev/null}") continue ;;')
+    if rust:
+        rules.append(b'        "${CARGO_HOME:-$HOME/.cargo}/bin") continue ;;')
+    if not rules:
+        return b""
+    return b"\n".join([
+        b"# >>> init system tools >>>",
+        b"_init_rest=$PATH:",
+        b"_init_path=",
+        b'while [ -n "$_init_rest" ]; do',
+        b"    _init_entry=${_init_rest%%:*}",
+        b"    _init_rest=${_init_rest#*:}",
+        b'    case "$_init_entry" in',
+        *rules,
+        b"    esac",
+        b"    _init_path=$_init_path$_init_entry:",
+        b"done",
+        b'export PATH="${_init_path%:}"',
+        b"unset _init_rest _init_path _init_entry",
+        *([b"unset NVM_BIN NVM_INC"] if node else []),
+        *([CARGO_FALLBACK.rstrip(b"\n")] if rust else []),
+        b"# <<< init system tools <<<",
+        b"",
+    ])
 
 
 def color(text, code):
@@ -249,17 +300,36 @@ def verify_tools(installed):
     return all(checks)
 
 
-def remove_old_activation(home):
+def configure_shell_defaults(home, installed):
     for filename in (".bashrc", ".zshrc"):
-        profile = home / filename
+        profile = (home / filename).resolve()
         try:
             content = profile.read_bytes()
         except FileNotFoundError:
             continue
-        updated = OLD_ACTIVATION.sub(b"", content)
-        if updated != content:
-            profile.write_bytes(updated)
-            print("Removed old Python activation from {}.".format(profile))
+        updated = SYSTEM_TOOLS.sub(b"", OLD_ACTIVATION.sub(b"", content))
+        node = {"nodejs", "npm"}.issubset(installed) and b"$NVM_DIR/nvm.sh" in updated
+        rust = {"rustc", "cargo"}.issubset(installed) and b"# >>> init rustup >>>" in updated
+        if node:
+            updated = NVM_STARTUP.sub(rb"\1 --no-use\2", updated)
+        if rust:
+            updated = RUSTUP_STARTUP.sub(
+                lambda match: match[1] + match[2] + CARGO_FALLBACK.replace(b"\n", match[2]), updated
+            )
+        block = system_tool_path(node, rust)
+        if block:
+            newline = b"\r\n" if b"\r\n" in updated else b"\n"
+            if updated and not updated.endswith(b"\n"):
+                updated += newline
+            updated += block.replace(b"\n", newline)
+        if updated == content:
+            continue
+        with tempfile.TemporaryDirectory(prefix=".init-shell-", dir=profile.parent) as directory:
+            temporary = Path(directory) / profile.name
+            temporary.write_bytes(updated)
+            shutil.copymode(profile, temporary)
+            temporary.replace(profile)
+        status("ok", "Updated system tool defaults in {}".format(profile), "32")
 
 
 def main(args):
@@ -287,7 +357,7 @@ def main(args):
         if not (python_ok and tools_ok):
             status("failed", "Lab verification failed", "31")
             return 1
-        remove_old_activation(Path.home())
+        configure_shell_defaults(Path.home(), installed)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
         status("failed", "Lab setup: {}".format(error), "31")
         return 1

@@ -1,5 +1,7 @@
 from contextlib import redirect_stdout
 from io import StringIO
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -18,7 +20,7 @@ class InstallerTests(unittest.TestCase):
                 mock.patch.object(init, "install_packages", side_effect=[{"python3"}, {"python3", "git"}]) as install, \
                 mock.patch.object(init, "verify_python", return_value=True) as verify, \
                 mock.patch.object(init, "verify_tools", return_value=True) as verify_tools, \
-                mock.patch.object(init, "remove_old_activation") as clean:
+                mock.patch.object(init, "configure_shell_defaults") as clean:
             self.assertEqual(init.main([]), 0)
         preflight.assert_called_once_with()
         apt = refresh.call_args[0][0]
@@ -28,7 +30,7 @@ class InstallerTests(unittest.TestCase):
         ])
         verify.assert_called_once_with({"python3", "git"})
         verify_tools.assert_called_once_with({"python3", "git"})
-        clean.assert_called_once_with(Path.home())
+        clean.assert_called_once_with(Path.home(), {"python3", "git"})
         self.assertEqual([line for line in output.getvalue().splitlines() if line.startswith("[")], [
             "[1/4] Environment check", "[2/4] System foundation", "[3/4] Lab tools", "[4/4] Verification",
         ])
@@ -44,7 +46,7 @@ class InstallerTests(unittest.TestCase):
                 mock.patch.object(init, "refresh_index"), \
                 mock.patch.object(init, "install_packages", return_value=set()), \
                 mock.patch.object(init, "verify_python", return_value=False), \
-                mock.patch.object(init, "remove_old_activation") as clean:
+                mock.patch.object(init, "configure_shell_defaults") as clean:
             self.assertEqual(init.main([]), 1)
         clean.assert_not_called()
 
@@ -94,6 +96,58 @@ class InstallerTests(unittest.TestCase):
                 b"alias py=python\r\n"
             )
             for _ in range(2):
-                init.remove_old_activation(home)
+                init.configure_shell_defaults(home, set())
                 self.assertEqual(bashrc.read_bytes(), b"# keep\r\n\r\nalias py=python\r\n")
                 self.assertFalse((home / ".zshrc").exists())
+
+    def test_system_node_and_rust_precede_old_toolchains_after_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            for relative in ("system/bin", ".nvm/versions/node/v1/bin", ".cargo/bin"):
+                (home / relative).mkdir(parents=True)
+            nvm_bin = home / ".nvm/versions/node/v1/bin"
+            for relative in ("system/bin/node", "system/bin/rustc", ".nvm/versions/node/v1/bin/node",
+                             ".cargo/bin/rustc", ".cargo/bin/cargo-extra"):
+                command = home / relative
+                command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                command.chmod(0o755)
+            (home / ".nvm/nvm.sh").write_text(
+                'nvm() { :; }\n[ "$1" = --no-use ] || export PATH="$NVM_DIR/versions/node/v1/bin:$PATH"\n',
+                encoding="utf-8"
+            )
+            profile = home / ".bashrc"
+            profile.write_text(
+                'export NVM_DIR="$HOME/.nvm"\n'
+                '[ -s "$NVM_DIR/nvm.sh" ] && \\. "$NVM_DIR/nvm.sh"  # keep this\n'
+                '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"\n'
+                '# >>> init rustup >>>\n[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"\n'
+                '# <<< init rustup <<<\n', encoding="utf-8"
+            )
+            original = profile.read_bytes()
+            init.configure_shell_defaults(home, {"nodejs", "rustc"})
+            self.assertEqual(profile.read_bytes(), original)
+
+            installed = {"nodejs", "npm", "rustc", "cargo"}
+            init.configure_shell_defaults(home, installed)
+            updated = profile.read_bytes()
+            init.configure_shell_defaults(home, installed)
+            self.assertEqual(profile.read_bytes(), updated)
+            self.assertEqual(updated.count(b"--no-use"), 2)
+            self.assertIn(b"--no-use  # keep this", updated)
+
+            for shell in ("bash", "zsh"):
+                executable = shutil.which(shell)
+                if not executable:
+                    continue
+                result = subprocess.run(
+                    [executable, "-c", '. "$HOME/.bashrc"; command -v node rustc cargo-extra nvm'],
+                    env={**os.environ, "HOME": str(home), "NVM_BIN": str(nvm_bin),
+                         "CARGO_HOME": str(home / ".cargo"),
+                         "PATH": os.pathsep.join(map(str, (nvm_bin, home / ".cargo/bin", home / "system/bin",
+                                                          "/usr/bin", "/bin")))},
+                    stdout=subprocess.PIPE, universal_newlines=True, check=True,
+                )
+                self.assertEqual(result.stdout.splitlines(), [
+                    str(home / "system/bin/node"), str(home / "system/bin/rustc"),
+                    str(home / ".cargo/bin/cargo-extra"), "nvm",
+                ])
