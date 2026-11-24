@@ -1,4 +1,4 @@
-name: test
+name: CI
 
 on:
   push:
@@ -12,13 +12,19 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Python syntax
-        run: python3 -m compileall -q init.py tests
+        run: python3 -m compileall -q init.py iot tests
       - name: Unit tests
         run: python3 -m unittest discover -s tests -v
       - name: Help smoke test
@@ -36,38 +42,68 @@ jobs:
           - image: "ubuntu:24.04"
             account: tester
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Install, verify, repair and repeat in real environment
-        shell: bash
         env:
           IMAGE: ${{ matrix.image }}
           ACCOUNT: ${{ matrix.account }}
-        run: |
-          set -o pipefail
-          docker run --rm -e TERM=xterm -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 \
-            -e ACCOUNT -v "$PWD:/src:ro" \
-            -v /etc/ssl/certs/ca-certificates.crt:/tmp/host-ca.crt:ro \
-            -w /src "$IMAGE" bash -ec '
-            for source in /etc/apt/sources.list /etc/apt/sources.list.d/*.sources; do
-              [ ! -f "$source" ] || sed -i "s|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g" "$source"
-            done
-            apt-get -o Acquire::Retries=3 -o Acquire::https::CaInfo=/tmp/host-ca.crt update -qq
-            apt-get -o Acquire::https::CaInfo=/tmp/host-ca.crt install -y --no-install-recommends python3 ca-certificates curl sudo
-            python3 init.py --help
-            python3 -m unittest discover -s tests -q
-            if [ "$ACCOUNT" = tester ]; then
-              useradd -m -s /bin/bash tester
-              echo "tester ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/tester
-              chmod 440 /etc/sudoers.d/tester
-              runuser -u tester -- env HOME=/home/tester python3 tests/smoke_environment.py
-            else
-              python3 tests/smoke_environment.py
-            fi
-          ' 2>&1 | tee environment.log
+        run: bash .github/scripts/ci-container.sh "$IMAGE" environment "$ACCOUNT" 2>&1 | tee environment.log
       - name: Preserve integration log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: environment-${{ strategy.job-index }}
           path: environment.log
           retention-days: 7
+
+  iot-compatibility:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:18.04
+            legacy: true
+          - image: ubuntu:20.04
+            legacy: true
+          - image: ubuntu:24.04
+            legacy: false
+          - image: kalilinux/kali-rolling
+            legacy: false
+    env:
+      IMAGE: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v6
+        id: checkout
+        with:
+          persist-credentials: false
+      - name: Test static QEMU and real chroot execution
+        timeout-minutes: 15
+        run: bash .github/scripts/ci-container.sh "$IMAGE" qemu
+      - name: Install, exercise and repeat IoT tools on old Ubuntu
+        # Keep this check independent from QEMU and start it in a clean container.
+        if: ${{ !cancelled() && matrix.legacy && steps.checkout.outcome == 'success' }}
+        timeout-minutes: 20
+        run: bash .github/scripts/ci-container.sh "$IMAGE" legacy-iot
+
+  iot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install IoT tools and build FirmAE image
+        run: python3 init.py --iot
+      - name: Execute foreign ELF and FirmAE device/database tests
+        run: python3 tests/smoke_iot.py --firmae
+      - name: Check repeat installation and read-only verification
+        run: |
+          python3 init.py --iot
+          python3 init.py --iot-check
+      - name: Container diagnostics
+        if: failure()
+        run: firmae logs || true
