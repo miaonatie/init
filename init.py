@@ -63,6 +63,7 @@ LAB_TOOLS = {
 PACKAGES = tuple(package for group in (*FOUNDATION.values(), *LAB_TOOLS.values()) for package in group)
 PACKAGE_ALTERNATIVES = {"7zip": "p7zip-full", "bind9-dnsutils": "dnsutils"}
 SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+APT_INSTALL = ("install", "-y", "--no-remove", "--no-install-recommends")
 COMMAND_CHECKS = {
     "git": ("git", "--version"),
     "curl": ("curl", "--version"),
@@ -219,13 +220,23 @@ def select_package(package, installed, available):
     return package
 
 
+def apt_installable(packages):
+    result = subprocess.run(["/usr/bin/apt-get", "-s", *APT_INSTALL, *packages],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.returncode == 0 and not any(line.startswith(b"Remv ") for line in (result.stdout or b"").splitlines())
+
+
 def refresh_index(apt, installed):
     missing = [package for package in PACKAGES if select_package(package, installed, set()) not in installed]
     if not missing:
         return set()
     candidates = missing + [PACKAGE_ALTERNATIVES[p] for p in missing if p in PACKAGE_ALTERNATIVES]
-    if (set(PYTHON_PACKAGES).intersection(missing) or available_packages(candidates)
-            or not any(Path("/var/lib/apt/lists").glob("*_Packages*"))):
+    required = set(PYTHON_PACKAGES).intersection(missing)
+    cached = set() if required else available_packages(candidates)
+    # An already known dependency conflict does not require a network refresh on every run.
+    if cached == {"npm"} and not apt_installable(["npm"]):
+        return cached
+    if required or cached or not any(Path("/var/lib/apt/lists").glob("*_Packages*")):
         if os.geteuid() and not shutil.which("sudo", path=SYSTEM_PATH):
             raise RuntimeError("APT needs sudo to install missing packages. Run from a root shell or install sudo.")
         status("update", "APT package indexes", "36")
@@ -235,20 +246,31 @@ def refresh_index(apt, installed):
 
 
 def install_packages(groups, apt, installed, available):
-    pending = []
-    for title, packages in groups.items():
+    selected = {title: [select_package(package, installed, available) for package in packages]
+                for title, packages in groups.items()}
+    pending = [package for packages in selected.values() for package in packages
+               if package not in installed and (package in available or package in PYTHON_PACKAGES)]
+    # Older npm pulls in Node development headers that may conflict with the system OpenSSL headers.
+    npm_conflict = False
+    if "npm" in pending and not apt_installable(pending):
+        without_npm = [package for package in pending if package != "npm"]
+        if not without_npm or apt_installable(without_npm):
+            pending = without_npm
+            npm_conflict = True
+
+    for title, packages in selected.items():
         print(color(title, "1;34"), flush=True)
-        for preferred in packages:
-            package = select_package(preferred, installed, available)
+        for package in packages:
             if package in installed:
                 status("installed", package, "32")
-            elif package in available or package in PYTHON_PACKAGES:
-                pending.append(package)
+            elif package in pending:
                 status("install", package, "36")
+            elif package == "npm" and npm_conflict:
+                status("skipped", "npm conflicts with the system APT toolchain", "33")
             else:
                 status("unavailable", package, "33")
     if pending:
-        subprocess.run([*apt, "install", "-y", "--no-remove", "--no-install-recommends", *pending], check=True)
+        subprocess.run([*apt, *APT_INSTALL, *pending], check=True)
         installed = installed_packages()
         if not set(pending).issubset(installed):
             raise RuntimeError("APT did not install: " + ", ".join(sorted(set(pending) - installed)))

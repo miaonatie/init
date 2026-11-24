@@ -100,6 +100,26 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(bashrc.read_bytes(), b"# keep\r\n\r\nalias py=python\r\n")
                 self.assertFalse((home / ".zshrc").exists())
 
+    def test_installs_development_packages_when_legacy_npm_conflicts(self):
+        groups = {"System language toolchains": ("nodejs", "npm", "libssl-dev")}
+        output = StringIO()
+        installed = {"nodejs", "libssl-dev"}
+        with redirect_stdout(output), mock.patch.object(init, "installed_packages", return_value=installed), \
+                mock.patch.object(init.subprocess, "run", side_effect=[
+                    subprocess.CompletedProcess([], 100), subprocess.CompletedProcess([], 0),
+                    subprocess.CompletedProcess([], 0),
+                ]) as run:
+            self.assertEqual(init.install_packages(groups, ["apt-get"], set(), installed | {"npm"}), installed)
+        self.assertIn("[skipped] npm conflicts", output.getvalue())
+        self.assertNotIn("npm", run.call_args[0][0])
+
+        all_except_npm = set(init.PACKAGES) - {"npm"}
+        with mock.patch.object(init, "available_packages", return_value={"npm"}), \
+                mock.patch.object(init, "apt_installable", return_value=False), \
+                mock.patch.object(init.subprocess, "run") as no_update:
+            self.assertEqual(init.refresh_index(["apt-get"], all_except_npm), {"npm"})
+        no_update.assert_not_called()
+
     def test_system_node_and_rust_precede_old_toolchains_after_migration(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
