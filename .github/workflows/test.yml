@@ -59,6 +59,7 @@ jobs:
           retention-days: 7
 
   iot-compatibility:
+    name: IoT compatibility (${{ matrix.image }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
