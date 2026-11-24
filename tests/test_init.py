@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import subprocess
 import tempfile
 import unittest
@@ -10,14 +12,11 @@ import init
 class InstallerTests(unittest.TestCase):
     def test_no_arguments_installs_and_verifies_system_python(self):
         with mock.patch.object(init, "install_packages") as install, \
-                mock.patch.object(init.subprocess, "run") as run, \
+                mock.patch.object(init, "verify_python", return_value=True) as verify, \
                 mock.patch.object(init, "remove_old_activation") as clean:
             self.assertEqual(init.main([]), 0)
         install.assert_called_once_with()
-        run.assert_called_once_with(
-            ["/usr/bin/python3", "-I", "-c", "import " + ", ".join(init.LIBRARIES.values())],
-            check=True,
-        )
+        verify.assert_called_once_with()
         clean.assert_called_once_with(Path.home())
 
     def test_arguments_are_rejected_before_installing(self):
@@ -27,17 +26,20 @@ class InstallerTests(unittest.TestCase):
 
     def test_failed_import_check_keeps_old_activation(self):
         with mock.patch.object(init, "install_packages"), \
-                mock.patch.object(init.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "python3")), \
+                mock.patch.object(init, "verify_python", return_value=False), \
                 mock.patch.object(init, "remove_old_activation") as clean:
             self.assertEqual(init.main([]), 1)
         clean.assert_not_called()
 
     def test_existing_packages_need_no_apt_or_sudo(self):
         installed = "\n".join("installed\t" + package for package in (*init.PACKAGES, init.PYTHON_ALIAS))
-        with mock.patch.object(init.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, installed)) as run:
+        output = StringIO()
+        with redirect_stdout(output), mock.patch.object(
+                init.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, installed)) as run:
             init.install_packages()
         run.assert_called_once()
         self.assertEqual(run.call_args[0][0][0], "dpkg-query")
+        self.assertEqual(output.getvalue().count("[installed]"), len(init.PACKAGES) + 1)
 
     def test_missing_packages_are_installed_with_apt(self):
         for alias_available in (True, False):

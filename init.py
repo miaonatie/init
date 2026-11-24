@@ -49,17 +49,45 @@ def alias_available():
 
 def install_packages():
     missing, alias_missing = missing_packages()
-    if not missing and not (alias_missing and alias_available()):
-        print("System Python packages are already installed.")
-        return
-
     apt = ["sudo"] if os.geteuid() else []
     apt += ["apt-get", "-o", "Acquire::Retries=2"]
-    subprocess.run([*apt, "update"], check=True)
-    if alias_missing and alias_available():
-        missing.append(PYTHON_ALIAS)
+    if missing or (alias_missing and alias_available()):
+        subprocess.run([*apt, "update"], check=True)
+        if alias_missing and alias_available():
+            missing.append(PYTHON_ALIAS)
+
+    print("APT packages", flush=True)
+    for package in (*PACKAGES, PYTHON_ALIAS):
+        if package in missing:
+            status = "install"
+        elif package == PYTHON_ALIAS and alias_missing:
+            status = "unavailable"
+        else:
+            status = "installed"
+        print("  [{}] {}".format(status, package), flush=True)
     if missing:
         subprocess.run([*apt, "install", "-y", "--no-install-recommends", *missing], check=True)
+
+
+def verify_python():
+    print("System Python checks", flush=True)
+    probe = """
+import importlib
+import sys
+
+print("  [ok] Python {} ({})".format(sys.version.split()[0], sys.executable))
+failed = False
+for module in sys.argv[1:]:
+    try:
+        importlib.import_module(module)
+    except Exception as error:
+        print("  [failed] import {}: {}".format(module, error))
+        failed = True
+    else:
+        print("  [ok] import {}".format(module))
+sys.exit(failed)
+"""
+    return subprocess.run([PYTHON, "-I", "-c", probe, *LIBRARIES.values()]).returncode == 0
 
 
 def remove_old_activation(home):
@@ -82,7 +110,9 @@ def main(args):
 
     try:
         install_packages()
-        subprocess.run([PYTHON, "-I", "-c", "import " + ", ".join(LIBRARIES.values())], check=True)
+        if not verify_python():
+            print("System Python verification failed.", file=sys.stderr)
+            return 1
         remove_old_activation(Path.home())
     except (OSError, subprocess.CalledProcessError) as error:
         print("System Python setup failed: {}".format(error), file=sys.stderr)
