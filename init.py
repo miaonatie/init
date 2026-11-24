@@ -91,7 +91,7 @@ COMMAND_CHECKS = {
     "file": ("file", "--version"),
     "binutils": ("readelf", "--version"),
     "gdb": ("gdb", "-nx", "--version"),
-    "strace": ("strace", "--version"),
+    "strace": ("strace", "-V"),
     "qemu-user": ("qemu-aarch64", "--version"),
     "qemu-utils": ("qemu-img", "--version"),
     "device-tree-compiler": ("dtc", "--version"),
