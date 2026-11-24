@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: ["ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "debian:13", "kalilinux/kali-rolling"]
+        image: ["ubuntu:18.04", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "debian:13", "kalilinux/kali-rolling"]
     steps:
       - uses: actions/checkout@v6
         with:
