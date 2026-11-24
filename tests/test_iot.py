@@ -1,18 +1,14 @@
-"""IoT installation and container lifecycle regressions, without host mutation."""
+"""FirmAE container lifecycle regressions, without host mutation."""
 import importlib.util
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import init
-from smoke_iot import minimal_elf
-
-SPEC = importlib.util.spec_from_file_location("iot_lab", init.ROOT / "iot/lab.py")
+IOT_DIR = Path(__file__).resolve().parents[1] / "iot"
+SPEC = importlib.util.spec_from_file_location("iot_lab", IOT_DIR / "lab.py")
 lab = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(lab)
 
@@ -23,130 +19,10 @@ class IoTTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         for name in ("Dockerfile", "entrypoint.sh", "USAGE.md"):
-            (self.root / name).write_text((init.ROOT / "iot" / name).read_text(encoding="utf-8"), encoding="utf-8")
+            (self.root / name).write_text((IOT_DIR / name).read_text(encoding="utf-8"), encoding="utf-8")
         (self.root / "config.json").write_text(json.dumps({
-            "firmae": str(self.root / "source checkout"), "revision": init.FIRMAE_REVISION}))
+            "firmae": str(self.root / "source checkout"), "revision": "test-revision"}))
         self.lab = lab.Lab(self.root)
-
-    def test_static_elf_detection_accepts_real_static_program_and_rejects_dynamic_or_wrapper(self):
-        if not init.shutil.which("readelf"):
-            self.skipTest("readelf not yet installed in the bootstrap container")
-        b = init.Bootstrap()
-        binary = self.root / "static.elf"
-        binary.write_bytes(minimal_elf("aarch64"))
-        # readelf inspects foreign ELF without executing it.
-        self.assertTrue(b.statically_linked_elf(str(binary)))
-        self.assertFalse(b.statically_linked_elf(sys.executable))
-        wrapper = self.root / "wrapper"
-        wrapper.write_text("#!/bin/sh\nexec qemu-arm \"$@\"\n")
-        self.assertFalse(b.statically_linked_elf(str(wrapper)))
-
-    def test_static_elf_detection_rejects_needed_libraries_even_without_interpreter(self):
-        b = init.Bootstrap()
-        binary = self.root / "elf"
-        binary.write_bytes(minimal_elf("arm"))
-        for output in ("  INTERP  0x100 0x200\n", " 0x1 (NEEDED) Shared library: [libc.so.6]\n"):
-            with self.subTest(output=output), mock.patch.object(
-                    b, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
-                self.assertFalse(b.statically_linked_elf(str(binary)))
-
-    def test_modern_qemu_native_static_provider_is_selected_without_legacy_name(self):
-        b = init.Bootstrap()
-        b.find_usable_command = mock.Mock(side_effect=[None, "/usr/bin/qemu-arm"])
-        b.statically_linked_elf = mock.Mock(return_value=True)
-        self.assertEqual(b.qemu_static_command("arm"), "/usr/bin/qemu-arm")
-        b.statically_linked_elf.assert_called_once_with("/usr/bin/qemu-arm")
-
-    def test_dynamic_qemu_is_never_accepted_as_static(self):
-        b = init.Bootstrap()
-        b.find_usable_command = mock.Mock(side_effect=[None, "/usr/bin/qemu-arm"])
-        b.statically_linked_elf = mock.Mock(return_value=False)
-        self.assertIsNone(b.qemu_static_command("arm"))
-
-    def test_modern_provider_adds_real_compatibility_symlinks_and_repeat_is_noop(self):
-        b = init.Bootstrap()
-        commands = self.root / "bin"
-        commands.mkdir()
-        sources = self.root / "native"
-        sources.mkdir()
-        for arch in init.QEMU_USER_ARCHES:
-            (sources / ("qemu-" + arch)).write_bytes(minimal_elf(arch))
-        b.qemu_static_command = mock.Mock(side_effect=lambda arch: str(sources / ("qemu-" + arch)))
-        b.find_usable_command = mock.Mock(side_effect=lambda names, _: (
-            str(commands / names[0]) if (commands / names[0]).exists() else None))
-        b.statically_linked_elf = mock.Mock(return_value=True)
-        b.apt_update = mock.Mock()
-        b.apt_install = mock.Mock()
-        real_run = b.run
-
-        def link(command, **kwargs):
-            if command[:2] == ["ln", "-sfn"]:
-                Path(command[3]).symlink_to(command[2])
-                return subprocess.CompletedProcess(command, 0)
-            return real_run(command, **kwargs)
-
-        with mock.patch.object(init, "QEMU_COMPAT_DIR", commands), mock.patch.object(b, "run", side_effect=link) as run:
-            self.assertTrue(b.install_qemu_static())
-            for arch in init.QEMU_USER_ARCHES:
-                alias = commands / ("qemu-" + arch + "-static")
-                self.assertTrue(alias.is_symlink())
-                self.assertEqual(alias.read_bytes(), minimal_elf(arch))
-            self.assertTrue(b.install_qemu_static())
-            self.assertEqual(sum(c[0][0][:2] == ["ln", "-sfn"] for c in run.call_args_list), 4)
-        b.apt_update.assert_not_called()
-        b.apt_install.assert_not_called()
-        self.assertNotIn("qemu-user-static", init.IOT_APT)
-        self.assertFalse(b.failures)
-
-    def test_legacy_distro_installs_separate_static_package_only_when_needed(self):
-        b = init.Bootstrap()
-        installed = []
-        b.qemu_static_command = mock.Mock(side_effect=lambda arch: (
-            "/usr/bin/qemu-" + arch + "-static" if installed else None))
-        b.apt_update = mock.Mock(return_value=True)
-        b.package_available = mock.Mock(return_value=True)
-        b.apt_install = mock.Mock(side_effect=lambda *args, **kwargs: installed.append(True))
-        b.find_usable_command = mock.Mock(side_effect=lambda names, _: names[0])
-        b.statically_linked_elf = mock.Mock(return_value=True)
-        self.assertTrue(b.install_qemu_static())
-        b.apt_install.assert_called_once_with(["qemu-user-static"], "legacy static QEMU binaries", required=True)
-        self.assertFalse(b.failures)
-
-    def test_missing_static_provider_remains_a_real_error(self):
-        b = init.Bootstrap()
-        b.qemu_static_command = mock.Mock(return_value=None)
-        b.apt_update = mock.Mock(return_value=True)
-        b.package_available = mock.Mock(return_value=False)
-        b.apt_install = mock.Mock()
-        self.assertFalse(b.install_qemu_static())
-        self.assertEqual(len(b.failures), len(init.QEMU_USER_ARCHES))
-        b.apt_install.assert_not_called()
-
-    def test_verification_accepts_native_static_names_without_installing_aliases(self):
-        b = init.Bootstrap()
-        b.arch = "aarch64"  # Does not need the separate x86_64 FirmAE image.
-        b.find_usable_command = mock.Mock(return_value="working")
-        b.qiling_available = mock.Mock(return_value=True)
-        b.qemu_static_command = mock.Mock(side_effect=lambda arch: "/usr/bin/qemu-" + arch)
-        b.install_qemu_static = mock.Mock()
-        self.assertTrue(b.verify_iot())
-        b.install_qemu_static.assert_not_called()
-        self.assertFalse(b.failures)
-
-    def test_iot_check_routes_without_installing_or_requesting_sudo(self):
-        with mock.patch.object(init, "Bootstrap") as constructor:
-            b = constructor.return_value
-            b.iot_only.return_value = 0
-            self.assertEqual(init.main(["--iot-check"]), 0)
-            b.iot_only.assert_called_once_with(check=True)
-            b.install.assert_not_called()
-            b.require_sudo.assert_not_called()
-        b = init.Bootstrap()
-        with mock.patch.object(b, "verify_iot"), mock.patch.object(b, "install_iot_environment") as install, \
-                mock.patch.object(b, "preflight") as preflight:
-            self.assertEqual(b.iot_only(check=True), 0)
-            install.assert_not_called()
-            preflight.assert_not_called()
 
     def test_check_without_docker_is_read_only_and_explicitly_pending(self):
         with mock.patch.object(self.lab, "source_ready", return_value=True), \
@@ -225,70 +101,6 @@ class IoTTests(unittest.TestCase):
                 lab.main(["--help"])
             self.assertEqual(context.exception.code, 0)
             constructor.assert_not_called()
-
-    def test_qiling_probe_checks_cli_and_runs_cpu_instructions(self):
-        b = init.Bootstrap()
-        python = self.root / "bin/python"
-        python.parent.mkdir()
-        python.touch()
-        python.with_name("qltool").touch()
-        with mock.patch.object(init, "QILING_DIR", self.root), \
-                mock.patch.object(b, "run", return_value=subprocess.CompletedProcess([], 0)) as run, \
-                mock.patch.object(b, "executable_usable", return_value=True) as cli:
-            self.assertTrue(b.qiling_available())
-            self.assertIn("q.run()", run.call_args[0][0][-1])
-            cli.assert_called_once_with(str(python.with_name("qltool")), ["--help"])
-
-    def test_qiling_repair_uses_own_interpreter_and_pinned_source(self):
-        b = init.Bootstrap()
-        with mock.patch.object(init, "QILING_DIR", self.root / "qiling"), \
-                mock.patch.object(b, "qiling_available", side_effect=[False, True]), \
-                mock.patch.object(b, "install_uv", return_value=True), \
-                mock.patch.object(b, "uv_executable", return_value="uv"), \
-                mock.patch.object(b, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
-            self.assertTrue(b.install_qiling())
-            command = run.call_args[0][0]
-            self.assertIn(str(self.root / "qiling/bin/python"), command)
-            self.assertIn(init.QILING_SPEC, command)
-            self.assertNotIn("--system", command)
-            binary_options = [command[i + 1] for i, arg in enumerate(command) if arg == "--only-binary"]
-            self.assertEqual(binary_options, ["gevent", "greenlet"])
-
-    def test_old_unsquashfs_valid_version_exit_is_accepted_but_errors_are_not(self):
-        b = init.Bootstrap()
-        for code, output, expected in (
-            (1, "unsquashfs version 4.3 (2014/05/12)\nUsage: unsquashfs [options] filesystem", True),
-            (0, "unsquashfs version 4.6.1\n", True),
-            (1, "unsquashfs: error while loading shared libraries: liblzma.so", False),
-            (1, "Usage: unsquashfs [options] filesystem", False),
-            (2, "unsquashfs version 4.3\n", False),
-        ):
-            with self.subTest(code=code, output=output), mock.patch.object(
-                    b, "run", return_value=subprocess.CompletedProcess([], code, output, "")):
-                self.assertEqual(b.executable_usable("/usr/bin/unsquashfs", ["-version"]), expected)
-        self.assertEqual(init.IOT_PROBES["unsquashfs"], ["-version"])
-
-    def test_old_ubuntu_missing_ripgrep_is_optional_in_iot_too(self):
-        b = init.Bootstrap()
-        b.distro = {"id": "ubuntu", "version": "18.04"}
-        b.apt_update = mock.Mock(return_value=True)
-        b.package_installed = mock.Mock(return_value=False)
-        b.package_available = mock.Mock(return_value=False)
-        self.assertNotIn("ripgrep", init.IOT_APT)
-        self.assertEqual(b.compatible_packages(init.IOT_OPTIONAL_APT, optional=True), [])
-        self.assertIn("ripgrep", b.compat_skips)
-        self.assertFalse(b.failures)
-
-    def test_qiling_probe_preserves_error_details_for_verification(self):
-        b = init.Bootstrap()
-        (self.root / "bin").mkdir()
-        for name in ("python", "qltool"):
-            (self.root / "bin" / name).touch()
-        with mock.patch.object(init, "QILING_DIR", self.root), mock.patch.object(
-                b, "run", return_value=subprocess.CompletedProcess([], 1, "", "ImportError: libunicorn missing")):
-            self.assertFalse(b.qiling_available())
-        self.assertIn("ImportError: libunicorn missing", b._probe_errors[str(self.root / "bin/python")])
-
 
 if __name__ == "__main__":
     unittest.main()

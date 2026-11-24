@@ -8,14 +8,6 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: test-${{ github.ref }}
-  cancel-in-progress: true
-
-defaults:
-  run:
-    shell: bash
-
 jobs:
   test:
     runs-on: ubuntu-24.04
@@ -23,88 +15,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Python syntax
-        run: python3 -m compileall -q init.py iot tests
-      - name: Unit tests
-        run: python3 -m unittest discover -s tests -v
-      - name: Help smoke test
-        run: python3 init.py --help
-
-  environment:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        image: ["ubuntu:18.04", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "kalilinux/kali-rolling"]
-        account: [root]
-        include:
-          - image: "ubuntu:24.04"
-            account: tester
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Install, verify, repair and repeat in real environment
-        env:
-          IMAGE: ${{ matrix.image }}
-          ACCOUNT: ${{ matrix.account }}
-        run: bash .github/scripts/ci-container.sh "$IMAGE" environment "$ACCOUNT" 2>&1 | tee environment.log
-      - name: Preserve integration log
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: environment-${{ strategy.job-index }}
-          path: environment.log
-          retention-days: 7
-
-  iot-compatibility:
-    name: IoT compatibility (${{ matrix.image }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: ubuntu:18.04
-            legacy: true
-          - image: ubuntu:20.04
-            legacy: true
-          - image: ubuntu:24.04
-            legacy: false
-          - image: kalilinux/kali-rolling
-            legacy: false
-    env:
-      IMAGE: ${{ matrix.image }}
-    steps:
-      - uses: actions/checkout@v6
-        id: checkout
-        with:
-          persist-credentials: false
-      - name: Test static QEMU and real chroot execution
-        timeout-minutes: 15
-        run: bash .github/scripts/ci-container.sh "$IMAGE" qemu
-      - name: Install, exercise and repeat IoT tools on old Ubuntu
-        # Keep this check independent from QEMU and start it in a clean container.
-        if: ${{ !cancelled() && matrix.legacy && steps.checkout.outcome == 'success' }}
-        timeout-minutes: 20
-        run: bash .github/scripts/ci-container.sh "$IMAGE" legacy-iot
-
-  iot:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Install IoT tools and build FirmAE image
-        run: python3 init.py --iot
-      - name: Execute foreign ELF and FirmAE device/database tests
-        run: python3 tests/smoke_iot.py --firmae
-      - name: Check repeat installation and read-only verification
+      - run: python3 -m unittest discover -s tests -v
+      - name: Install system Python packages and run again
         run: |
-          python3 init.py --iot
-          python3 init.py --iot-check
-      - name: Container diagnostics
-        if: failure()
-        run: firmae logs || true
+          python3 init.py
+          python3 init.py

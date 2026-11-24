@@ -1,8 +1,6 @@
 # IoT 固件分析与复现速查
 
-在 init 仓库中：`git pull && python3 init.py --iot` 仅补装本模块；
-`python3 init.py --iot-check` 只检查。正常 `python3 init.py` 也会安装。
-随时运行 `iot-help` 查看本页。适用 Ubuntu 18.04+ / Kali；推荐较新的 Kali WSL2。
+本页供已配置 IoT 工具的环境使用。可用 `iot-help` 查看本页，用 `firmae doctor` 检查已有的 FirmAE 环境。
 
 | 工具 | 用途 | 最短用法 |
 | --- | --- | --- |
@@ -35,8 +33,7 @@ qemu-mipsel -L ./squashfs-root ./squashfs-root/bin/busybox ls
 根据 `file` 的输出，MIPS 小端用 `qemu-mipsel`，大端用 `qemu-mips`，
 32 位 ARM 用 `qemu-arm`，64 位 ARM 用 `qemu-aarch64`；这些架构均装有 `-static` 版本。
 新版 Kali/Debian 已将静态模拟器合并到 `qemu-user`，可能没有 `qemu-user-static` 包。
-安装器会检查 ELF 是否真正静态链接，并补齐 `qemu-*-static` 兼容链接；旧版 Ubuntu
-仍按需安装独立包。无需为了旧包名降级或更换软件源。
+
 `-L` 指向固件 rootfs，为动态解释器/库提供前缀，不能提供完整的 chroot 语义。
 如果程序硬编码 `/etc`、`/www` 等路径，使用工作副本上的 chroot 或 Qiling：
 
@@ -142,7 +139,6 @@ FirmAE 常见支持范围是 ARM32、MIPS32 小端/大端，并非所有固件�
 - Docker Desktop 的内核/设备与 WSL 发行版可能不同；TUN/loop 报错先看 `firmae logs`。
   如果当前内核不支持，使用 Ubuntu x86_64 虚拟机跑 FirmAE 更省事。
 - 文件尽量放在 `~/iot`，避免 `/mnt/c` 的权限/符号链接/性能问题。
-- 完整 bootstrap 适合首次安装；已有环境只运行 `--iot`，可反复补装与检查。
 
 参考：FirmAE https://github.com/pr0v3rbs/FirmAE ，
 Qiling https://docs.qiling.io/ ，QEMU https://www.qemu.org/docs/master/user/main.html 。

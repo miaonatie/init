@@ -73,7 +73,7 @@ class Lab:
 
     def check(self):
         if not self.source_ready():
-            raise RuntimeError("Pinned FirmAE source missing; rerun python3 init.py --iot")
+            raise RuntimeError("The FirmAE checkout configured in config.json is missing its pinned revision")
         if not self.connect():
             print("FirmAE source prepared; Docker image/runtime pending (daemon unavailable).")
             return 3
@@ -86,7 +86,7 @@ class Lab:
         if platform.machine().lower() not in ("x86_64", "amd64"):
             raise RuntimeError("This FirmAE image requires an x86_64 Linux host.")
         if not self.source_ready():
-            raise RuntimeError("Pinned FirmAE source missing; rerun python3 init.py --iot")
+            raise RuntimeError("The FirmAE checkout configured in config.json is missing its pinned revision")
         if if_available and not self.connect():
             print("Docker daemon unavailable; deferred image build. Run firmae build later.")
             return 3
