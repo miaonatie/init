@@ -76,6 +76,24 @@ PYTHON_CLI = {
 PWN_SUBCOMMANDS = ("checksec", "cyclic", "asm", "disasm", "shellcraft")
 PWNLIB_NOTERM = "1"
 
+# `checksec` has two incompatible implementations once APT and pwntools are both
+# installed: Debian's checksec.sh wants `--file=x`, pwntools wants a bare path.
+# Whoever wins /usr/local/bin decides which convention silently breaks, so the
+# installer writes one dispatcher that accepts both.
+CHECKSEC_USAGE = """#!/bin/sh
+# Unified checksec: APT-style options go to checksec.sh, a bare binary path goes
+# to pwntools, so `checksec --file=x` and `checksec x` both work.
+if [ $# -eq 0 ]; then
+    exec /usr/bin/checksec
+fi
+for arg in "$@"; do
+    case "$arg" in
+        -*) exec /usr/bin/checksec "$@" ;;
+    esac
+done
+PWNLIB_NOTERM=1 exec {pwn} checksec "$@"
+"""
+
 # PyPI filebytes still calls ast.Str at build time, which Python 3.14 removed.
 # ropper needs the merged upstream fix (sashs/filebytes#36) until it is released.
 FILEBYTES_FIX = (
@@ -557,16 +575,32 @@ def install_pwn_wrappers(apt):
     curses warning when no terminfo database exists. Both cases get a launcher
     under /usr/local/bin that sets PWNLIB_NOTERM and calls the library entry
     point directly, so no wrapper ever recurses into itself.
+
+    `checksec` is special: Debian also ships /usr/bin/checksec (checksec.sh) and
+    the two accept different arguments, so that name gets a dispatcher instead
+    of a plain wrapper.
     """
     pwn = shutil.which("pwn", path=SYSTEM_PATH)
     if pwn is None:
         return
     for name in PWN_SUBCOMMANDS:
         existing = shutil.which(name, path=SYSTEM_PATH)
+        if name == "checksec" and Path("/usr/bin/checksec").exists():
+            if existing is None or not writes_dispatcher(existing):
+                write_root_file(apt, Path("/usr/local/bin/checksec"),
+                                CHECKSEC_USAGE.format(pwn=quote(pwn)))
+            continue
         if existing is None:
             launcher(apt, name, [pwn, name])
     if not writes_noterm(pwn):
         launcher(apt, "pwn", [PYTHON, "-c", PWN_MODULE_ENTRY])
+
+
+def writes_dispatcher(path):
+    try:
+        return b"Unified checksec" in Path(path).read_bytes()
+    except OSError:
+        return False
 
 
 def check_command(label, command, show_output=False):
@@ -796,6 +830,145 @@ def configure_shell_defaults(home, installed):
         status("ok", "Updated system tool defaults in {}".format(profile), "32")
 
 
+def doctor():
+    """Report problems that a package list cannot see.
+
+    Everything here was found by running the installer on a real host, not by
+    reading it: tools that resolve to a Windows binary, two implementations of
+    the same command, pip copies shadowing newer APT copies, and a shell that
+    pays seconds of startup cost. Each finding prints what to do about it.
+    """
+    findings = []
+
+    # 1. A tool that only resolves through the inherited Windows PATH will stop
+    #    working the moment appendWindowsPath is off or interop is disabled.
+    clean = {name: shutil.which(name, path=SYSTEM_PATH) for name in
+             ("python3", "python", "pip", "node", "npm", "go", "java", "javac",
+              "ruby", "gem", "git", "rg", "jq", "bat", "fd", "7z", "curl", "ssh",
+              "docker", "gcc", "make")}
+    fallthrough = []
+    for name, resolved in clean.items():
+        if resolved is not None:
+            continue
+        outside = shutil.which(name)
+        if outside is not None and outside.startswith("/mnt/"):
+            fallthrough.append("{} -> {}".format(name, outside))
+    if fallthrough:
+        findings.append(("warn", "commands resolve only through the Windows PATH",
+                         fallthrough,
+                         "install the Linux build (the installer already lists them) or keep WSL interop enabled"))
+
+    # 2. Two different programs answering to one name is the main source of
+    #    "it worked yesterday" reports.
+    for name in ("checksec", "pwn", "ROPgadget", "ropper", "r2", "radare2", "gdbserver"):
+        found = []
+        for directory in ("/usr/bin", "/usr/local/bin", str(Path.home() / ".local/bin")):
+            candidate = Path(directory) / name
+            if candidate.exists():
+                found.append(str(candidate))
+        if len(found) <= 1:
+            continue
+        winner = shutil.which(name, path=SYSTEM_PATH)
+        advice = ("a dispatcher accepts both argument styles"
+                  if name == "checksec" and winner and writes_dispatcher(winner)
+                  else "the /usr/local copy wins; drop it if you expect the APT one")
+        findings.append(("info", "{} exists in {} places".format(name, len(found)),
+                         ["{}  <- wins".format(winner) if winner == p else p for p in found],
+                         advice))
+
+    # 3. A pip copy in /usr/local shadows an APT copy in /usr/lib, and pip
+    #    versions are frequently older than the distro's.
+    shadowed = shadowed_modules()
+    if shadowed:
+        findings.append(("warn", "pip modules shadow APT modules", shadowed,
+                         "expected on Kali: pip tools (netexec, impacket, wfuzz) pin older versions; "
+                         "do not delete them, they are dependency requirements"))
+
+    # 4. Shell startup cost. Measured on WSL: a bare `zsh -f` starts in ~10 ms,
+    #    oh-my-zsh adds ~1 s, and disabling compinit's security check does NOT
+    #    help -- within one process every compinit variant costs 0 ms, so the
+    #    cost is process start plus loading ~1200 completion functions.
+    cost = shell_startup_ms()
+    if cost is not None and cost > 400:
+        findings.append(("warn", "interactive shell start takes {} ms".format(cost),
+                         ["a bare `zsh -f` starts in ~10 ms, so the rest is oh-my-zsh",
+                          "compinit -C does not help: in-process every variant is 0 ms",
+                          "the cost is loading ~1200 completion functions from cold"],
+                         "this is a property of the framework, not a misconfiguration; "
+                         "only removing plugins or dropping oh-my-zsh changes it"))
+
+    # 5. nvm sourced eagerly when node already comes from APT.
+    if doc_references(Path.home() / ".zshrc", b"b/c") is False and doc_references(
+            Path.home() / ".zshrc", b"nvm.sh") and shutil.which("node", path=SYSTEM_PATH):
+        lazy = doc_references(Path.home() / ".zshrc", b"unset -f nvm")
+        if not lazy:
+            findings.append(("warn", "nvm is sourced eagerly but node comes from APT",
+                             ["APT node: {}".format(shutil.which("node", path=SYSTEM_PATH)),
+                              "nvm.sh is ~5000 lines and is only needed when you call nvm"],
+                             "make nvm lazy: load nvm.sh inside an nvm() function instead"))
+        else:
+            findings.append(("ok", "nvm is lazy", [], ""))
+
+    if not findings:
+        status("ok", "no problems found", "32")
+        return 0
+    for level, title, details, advice in findings:
+        if level == "ok":
+            status("ok", title, "32")
+            continue
+        status(level, title, "33" if level == "warn" else "36")
+        for line in details:
+            print("      " + line)
+        if advice:
+            print("      -> " + advice)
+    return 0
+
+
+def shadowed_modules():
+    """Modules importable from /usr/local that APT also provides."""
+    import re as _re
+    apt_dir = Path("/usr/lib/python3/dist-packages")
+    pip_dirs = sorted(Path("/usr/local/lib").glob("python3*/dist-packages"))
+    if not pip_dirs or not apt_dir.is_dir():
+        return []
+    pip_dir = pip_dirs[-1]
+
+    def versions(base):
+        out = {}
+        for entry in base.iterdir():
+            match = _re.match(r"(.+?)-([0-9][^-]*)\.(?:dist|egg)-info$", entry.name)
+            if match:
+                out.setdefault(match.group(1).lower().replace("_", "-"), match.group(2))
+        return out
+
+    apt, pip = versions(apt_dir), versions(pip_dir)
+    out = []
+    for name in sorted(set(apt) & set(pip)):
+        if apt[name].split("+")[0] != pip[name].split("+")[0]:
+            out.append("{}  apt={} pip={}".format(name, apt[name], pip[name]))
+    return out
+
+
+def shell_startup_ms():
+    shell = os.environ.get("SHELL", "")
+    if "zsh" not in shell and not shutil.which("zsh", path=SYSTEM_PATH):
+        return None
+    started = time.monotonic()
+    try:
+        subprocess.run(["zsh", "-ic", "exit"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return int((time.monotonic() - started) * 1000)
+
+
+def doc_references(path, needle):
+    try:
+        return needle in path.read_bytes()
+    except OSError:
+        return False
+
+
 def help_text():
     return """init - CTF lab installer (system Python, APT first)
 
@@ -804,6 +977,7 @@ Usage:
   python3 init.py --check     Verify only; installs nothing
   python3 init.py --check-python
                               Verify only the Python layer; installs nothing
+  python3 init.py --doctor    Diagnose an existing install; changes nothing
   python3 init.py --iot       Install/repair the IoT firmware lab
   python3 init.py --iot-check Verify the IoT lab; installs nothing
   python3 init.py --help      Show this help
@@ -858,17 +1032,22 @@ def main(args):
         print(help_text())
         return 0
     actions = {"--check": "check", "--check-python": "check-python",
+               "--doctor": "doctor",
                "--iot": "iot", "--iot-check": "iot-check"}
     if args and (len(args) != 1 or args[0] not in actions):
-        print("Usage: python3 init.py [--check] [--check-python] [--iot] [--iot-check]", file=sys.stderr)
+        print("Usage: python3 init.py [--check] [--check-python] [--doctor] [--iot] [--iot-check]",
+              file=sys.stderr)
         return 2
     action = actions[args[0]] if args else "install"
 
     started = time.monotonic()
     installed = set()
     try:
-        if action != "check-python":
+        if action not in ("check-python", "doctor"):
             stage(1, "Environment check")
+        if action == "doctor":
+            preflight()
+            return doctor()
         preflight()
         installed = installed_packages()
         if action == "check-python":

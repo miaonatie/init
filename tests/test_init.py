@@ -292,9 +292,43 @@ class PythonLayerTests(unittest.TestCase):
         with mock.patch.object(init, "write_root_file") as write, \
                 mock.patch.object(init, "status"), \
                 mock.patch.object(init, "writes_noterm", return_value=True), \
+                mock.patch.object(init, "writes_dispatcher", return_value=True), \
+                mock.patch.object(init.Path, "exists", return_value=True), \
                 mock.patch.object(init.shutil, "which", return_value="/usr/local/bin/exists"):
             init.install_pwn_wrappers(["apt-get"])
         write.assert_not_called()
+
+    def test_checksec_becomes_a_dispatcher_when_debian_also_ships_one(self):
+        """Two incompatible checksec programs must not shadow each other."""
+        with mock.patch.object(init, "status"), \
+                mock.patch.object(init, "write_root_file") as write, \
+                mock.patch.object(init, "writes_dispatcher", return_value=False), \
+                mock.patch.object(init.shutil, "which", side_effect=lambda name, path=None: {
+                    "pwn": "/usr/local/bin/pwn",
+                    "checksec": "/usr/bin/checksec",
+                }.get(name)) as _which, \
+                mock.patch.object(init.Path, "exists", return_value=True):
+            init.install_pwn_wrappers(["apt-get"])
+        written = {call[0][1].name: call[0][2] for call in write.call_args_list}
+        self.assertIn("checksec", written)
+        body = written["checksec"]
+        self.assertIn("Unified checksec", body)
+        self.assertIn("/usr/bin/checksec", body)
+        self.assertIn("checksec \"$@\"", body)
+        self.assertIn("/usr/local/bin/pwn", body)
+
+    def test_checksec_gets_a_plain_wrapper_when_no_debian_checksec_exists(self):
+        with mock.patch.object(init, "status"), \
+                mock.patch.object(init, "write_root_file") as write, \
+                mock.patch.object(init, "writes_noterm", return_value=True), \
+                mock.patch.object(init.shutil, "which",
+                                  side_effect=lambda name, path=None:
+                                  "/usr/local/bin/pwn" if name == "pwn" else None), \
+                mock.patch.object(init.Path, "exists", return_value=False):
+            init.install_pwn_wrappers(["apt-get"])
+        written = {call[0][1].name: call[0][2] for call in write.call_args_list}
+        self.assertIn("checksec", written)
+        self.assertNotIn("Unified checksec", written["checksec"])
 
     def test_verify_python_cli_requires_pwn_wrappers(self):
         output = StringIO()
