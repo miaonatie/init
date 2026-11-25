@@ -91,9 +91,11 @@ GROUPS = {
     ),
 }
 
-# APT 没打包、只能 pip 的 Python 工具。
+# APT 没打包、只能 pip 的 Python 工具。pwntools 在 24.04 之前的发行版里也要走这里。
 PIP_TOOLS = {
-    "ropper": ("filebytes-fix", "ropper"),  # ropper 依赖 filebytes
+    "pwntools": ("pwntools",),
+    "ROPgadget": ("ROPgadget",),
+    "ropper": ("filebytes-fix", "ropper"),
 }
 PWN_SUBCOMMANDS = ("checksec", "cyclic", "asm", "disasm", "shellcraft")
 PWNLIB_NOTERM = "1"
@@ -227,21 +229,27 @@ def apt(args, have):
     if not missing:
         return have
 
-    # 索引是不是可用，看的是"有没有包列表"，而不是"缺的这几个能不能查到"。
-    # 24.04 没有 fastfetch，apt-cache 对它返回空，但索引本身是好的，
-    # 这种情况不该每次运行都联网刷新。
-    lists = list(Path("/var/lib/apt/lists").glob("*_Packages*"))
-    if not lists:
+    candidates = missing + [ALTERNATIVES[p] for p in missing if p in ALTERNATIVES]
+
+    def ask():
+        out = subprocess.run(["apt-cache", "--no-all-versions", "show", *candidates],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             encoding="utf-8", errors="replace")
+        return {l[9:] for l in out.stdout.splitlines() if l.startswith("Package: ")}
+
+    available = ask()
+    # 索引是否健康，用一个必然存在的包来试；不能用"缺的包查不查得到"来判断——
+    # 那个发行版可能本来就没有那些包（20.04 没 python3-zstandard、24.04 没 fastfetch），
+    # 这时所有 missing 都查不到，available 为空，但那不是索引的问题。
+    healthy = bool(subprocess.run(["apt-cache", "--no-all-versions", "show", "bash"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                  encoding="utf-8", errors="replace").stdout.strip())
+    if not healthy:
         if os.geteuid() and not shutil.which("sudo", path=SYSTEM_PATH):
             raise RuntimeError("安装需要 root 或 sudo")
         say("update", "刷新 APT 索引", "36")
         subprocess.run([*args, "-o", "APT::Update::Error-Mode=any", "update"], check=True)
-
-    candidates = missing + [ALTERNATIVES[p] for p in missing if p in ALTERNATIVES]
-    out = subprocess.run(["apt-cache", "--no-all-versions", "show", *candidates],
-                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                         encoding="utf-8", errors="replace")
-    available = {l[9:] for l in out.stdout.splitlines() if l.startswith("Package: ")}
+        available = ask()
 
     for title, packages in GROUPS.items():
         print(color(title, "1;34"), flush=True)
@@ -250,10 +258,12 @@ def apt(args, have):
             resolved = resolve(package, have, available)
             if resolved in have:
                 say("installed", package, "32")
-            elif resolved in available or package.startswith("python3"):
+            elif resolved in available:
                 say("install", package, "36")
                 pending.append(resolved)
             else:
+                # 这个发行版没有这个包（24.04 没 fastfetch，20.04 没 python3-zstandard）。
+                # 绝不能塞进 apt-get install，否则整批返回 100，别的包全装不上。
                 say("unavailable", package, "33")
 
         if pending:
@@ -266,9 +276,10 @@ def apt(args, have):
             subprocess.run([*args, "install", "-y", "--no-remove",
                             "--no-install-recommends", *pending], check=True)
             have = installed()
-            missing_now = set(pending) - have
-            if missing_now:
-                raise RuntimeError("APT 未装上: " + ", ".join(sorted(missing_now)))
+            # APT 说装上了但 dpkg 查不到，说明这批里有个包是虚的；报出来但不中断，
+            # 后面的验证会把它标成 failed。
+            for package in sorted(set(pending) - have):
+                say("failed", "{} 装完查不到".format(package), "31")
     return have
 
 
@@ -318,33 +329,41 @@ def command_ok(command, arguments=("--help",)):
 
 
 def python_tools(args):
-    """补齐 APT 没给的 Python 命令行工具，并让 pwn 的入口点安静可用。"""
+    """补齐 APT 没给的 Python 命令行工具，并让 pwn 的入口点安静可用。
+
+    APT 只在 24.04+ 提供 pwntools，更早的发行版靠 pip。
+    """
     print(color("Python 工具", "1;34"), flush=True)
 
     version = python_minor()
-    for name in PIP_TOOLS:
-        state = command_ok(name, ("--version",))
+
+    def pip_tool(name, probe_arguments):
+        state = command_ok(name, probe_arguments)
         if state is True:
             say("installed", name, "32")
-            continue
+            return
         if state is False:
             say("repair", "{} 已坏，重装".format(name), "36")
         if version is not None and version < (3, 8):
             say("skipped", "{} 需要 Python 3.8+".format(name), "33")
-            continue
-        if state is not False:
+            return
+        if state is None:
             say("pip", name, "36")
         if pip_install(args, name):
             say("ok", name, "32")
         else:
             say("failed", "{} 安装失败".format(name), "31")
 
+    pip_tool("pwntools", ("--help",))
+    pip_tool("ROPgadget", ("--version",))
+    pip_tool("ropper", ("--version",))
+
     pwn = shutil.which("pwn", path=SYSTEM_PATH)
     if pwn is None:
-        say("skipped", "pwntools 未安装", "33")
+        say("skipped", "pwntools 未安装，跳过子命令", "33")
         return
 
-    # APT 的 pwntools 只提供 /usr/bin/pwn，缺 5 个子命令；补出来。
+    # APT 的 pwntools 只提供 /usr/bin/pwn；pip 的也是这样。补齐其余入口点。
     for name in PWN_SUBCOMMANDS:
         if name == "checksec" and Path("/usr/bin/checksec").exists():
             # APT 也有 checksec，但两者参数不同：写调度器，两种都收。
@@ -357,13 +376,18 @@ def python_tools(args):
 
     # 无 terminfo 的环境（容器/CI）导入 pwn 会打印 curses 告警，用包装抑制。
     if not writes_noterm(pwn):
-        write_root_file(args, Path("/usr/local/bin/pwn"),
-                        "#!/bin/sh\nPWNLIB_NOTERM=1 exec {} -c "
-                        "'import sys; from pwnlib.commandline.main import main; "
-                        "sys.argv[0]=\"pwn\"; sys.exit(main())' \"$@\"\n".format(quote(PYTHON)))
+        write_root_file(args, Path("/usr/local/bin/pwn"), PWN_QUIET.format(
+            python=quote(PYTHON)))
 
 
 LAUNCHER = '#!/bin/sh\nPWNLIB_NOTERM=1 exec {pwn} {name} "$@"\n'
+
+PWN_QUIET = (
+    '#!/bin/sh\n'
+    'PWNLIB_NOTERM=1 exec {python} -c '
+    "'import sys; from pwnlib.commandline.main import main; "
+    "sys.argv[0]=\"pwn\"; sys.exit(main())' \"$@\"\n"
+)
 
 CHECKSEC_DISPATCH = """#!/bin/sh
 # 统一 checksec：APT 风格（--file=x）走 checksec.sh，裸路径走 pwntools。

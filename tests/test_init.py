@@ -95,27 +95,81 @@ class PackageTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_a_package_this_release_lacks_does_not_force_a_refresh(self):
-        """24.04 has no fastfetch; that must not mean `apt update` on every run."""
+        """20.04 has no zoxide, 24.04 has no fastfetch; neither means a refresh."""
         have = set(init.PACKAGES) - {"fastfetch"}
-        with mock.patch.object(init.Path, "glob",
-                               return_value=iter([Path("/var/lib/apt/lists/x_Packages")])), \
+        known = "\n".join("Package: {}".format(p) for p in init.PACKAGES if p != "fastfetch")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(" ".join(str(p) for p in command))
+            if "show" in command:
+                # bash is present, so the index is healthy; fastfetch is simply absent.
+                if "bash" in command:
+                    return subprocess.CompletedProcess(command, 0, "Package: bash\n")
+                return subprocess.CompletedProcess(command, 0, known)
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(init, "installed", return_value=have), \
+                mock.patch.object(init, "subprocess") as proc:
+            proc.run.side_effect = fake_run
+            init.apt(["apt-get"], have)
+        self.assertFalse(any(" update" in c for c in calls), calls)
+
+    def test_refresh_happens_when_the_index_is_empty(self):
+        have = set(init.PACKAGES) - {"git"}
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(" ".join(str(p) for p in command))
+            if "show" in command:
+                return subprocess.CompletedProcess(command, 0, "")  # nothing known at all
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(init.os, "geteuid", return_value=0), \
                 mock.patch.object(init, "installed", return_value=have), \
                 mock.patch.object(init, "subprocess") as proc:
-            proc.run.return_value = subprocess.CompletedProcess([], 0, "")
+            proc.run.side_effect = fake_run
             init.apt(["apt-get"], have)
-        commands = [" ".join(map(str, c[0][0])) for c in proc.run.call_args_list]
-        self.assertFalse(any("update" in c for c in commands), commands)
+        self.assertTrue(any(" update" in c for c in calls), calls)
 
-    def test_refresh_happens_when_the_index_is_actually_missing(self):
+    def test_unavailable_packages_never_reach_apt_get_install(self):
+        """One unknown package makes apt-get fail with 100 and blocks the rest."""
+        have = set(init.PACKAGES) - {"python3-zstandard", "git"}
+        known = "Package: git\n"
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append([str(p) for p in command])
+            if "show" in command:
+                return subprocess.CompletedProcess(command, 0, known)
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with mock.patch.object(init.os, "geteuid", return_value=0), \
+                mock.patch.object(init, "installed", return_value=have | {"git"}), \
+                mock.patch.object(init, "subprocess") as proc:
+            proc.run.side_effect = fake_run
+            init.apt(["apt-get"], have)
+        installs = [c for c in calls if "install" in c]
+        self.assertTrue(installs)
+        for call in installs:
+            self.assertNotIn("python3-zstandard", call)
+
+    def test_a_package_apt_claims_but_dpkg_lacks_is_reported_not_raised(self):
         have = set(init.PACKAGES) - {"git"}
-        with mock.patch.object(init.Path, "glob", return_value=iter([])), \
+        output = StringIO()
+
+        def fake_run(command, **kwargs):
+            if "show" in command:
+                return subprocess.CompletedProcess(command, 0, "Package: git\n")
+            return subprocess.CompletedProcess(command, 0, "")
+
+        with redirect_stdout(output), \
                 mock.patch.object(init.os, "geteuid", return_value=0), \
                 mock.patch.object(init, "installed", return_value=have), \
                 mock.patch.object(init, "subprocess") as proc:
-            proc.run.return_value = subprocess.CompletedProcess([], 0, "")
+            proc.run.side_effect = fake_run
             init.apt(["apt-get"], have)
-        commands = [" ".join(map(str, c[0][0])) for c in proc.run.call_args_list]
-        self.assertTrue(any("update" in c for c in commands), commands)
+        self.assertIn("git 装完查不到", output.getvalue())
 
 
 class PythonToolTests(unittest.TestCase):
@@ -149,13 +203,39 @@ class PythonToolTests(unittest.TestCase):
     def test_broken_tool_is_reinstalled(self):
         output = StringIO()
         with redirect_stdout(output), \
-                mock.patch.object(init, "command_ok", side_effect=lambda name, *a: False if name == "ropper" else None), \
+                mock.patch.object(init, "command_ok",
+                                  side_effect=lambda name, *a: False if name == "ropper" else True), \
                 mock.patch.object(init, "python_minor", return_value=(3, 12)), \
                 mock.patch.object(init, "pip_install", return_value=True) as pip, \
                 mock.patch.object(init.shutil, "which", return_value=None):
             init.python_tools(["apt-get"])
         pip.assert_called_once_with(["apt-get"], "ropper")
         self.assertIn("重装", output.getvalue())
+
+    def test_pwntools_is_installed_by_pip_when_apt_has_none(self):
+        """20.04 and 22.04 have no python3-pwntools; pip must fill the gap."""
+        with redirect_stdout(StringIO()), \
+                mock.patch.object(init, "command_ok", return_value=None), \
+                mock.patch.object(init, "python_minor", return_value=(3, 10)), \
+                mock.patch.object(init, "pip_install", return_value=True) as pip, \
+                mock.patch.object(init, "write_root_file"), \
+                mock.patch.object(init.shutil, "which", return_value=None):
+            init.python_tools(["apt-get"])
+        installed = [c[0][1] for c in pip.call_args_list]
+        self.assertIn("pwntools", installed)
+        self.assertIn("ROPgadget", installed)
+        self.assertIn("ropper", installed)
+
+    def test_pip_tools_are_skipped_below_python_3_8(self):
+        output = StringIO()
+        with redirect_stdout(output), \
+                mock.patch.object(init, "command_ok", return_value=None), \
+                mock.patch.object(init, "python_minor", return_value=(3, 6)), \
+                mock.patch.object(init, "pip_install") as pip, \
+                mock.patch.object(init.shutil, "which", return_value=None):
+            init.python_tools(["apt-get"])
+        pip.assert_not_called()
+        self.assertIn("需要 Python 3.8+", output.getvalue())
 
     def test_pwn_wrappers_cover_missing_subcommands(self):
         written = {}
