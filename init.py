@@ -91,11 +91,11 @@ GROUPS = {
     ),
 }
 
-# APT 没打包、只能 pip 的 Python 工具。pwntools 在 24.04 之前的发行版里也要走这里。
+# pip 兜底的工具：键是包名，值是 (探测命令, 探测参数, pip 需求列表)。
 PIP_TOOLS = {
-    "pwntools": ("pwntools",),
-    "ROPgadget": ("ROPgadget",),
-    "ropper": ("filebytes-fix", "ropper"),
+    "pwntools": ("pwn", "--help", ("pwntools",)),
+    "ROPgadget": ("ROPgadget", "--version", ("ROPgadget",)),
+    "ropper": ("ropper", "--version", ("filebytes-fix", "ropper")),
 }
 PWN_SUBCOMMANDS = ("checksec", "cyclic", "asm", "disasm", "shellcraft")
 PWNLIB_NOTERM = "1"
@@ -303,14 +303,14 @@ def python_minor():
 
 def pip_install(args, name):
     flags = ["--break-system-packages"] if any(Path("/usr/lib").glob("python3*/EXTERNALLY-MANAGED")) else []
-    requirement = PIP_TOOLS[name]
+    _, _, requirement = PIP_TOOLS[name]
     packages = [FILEBYTES_FIX if r == "filebytes-fix" else r for r in requirement]
     prefix = ["sudo"] if args and args[0] == "sudo" else []
     result = subprocess.run(
         [*prefix, PYTHON, "-m", "pip", "install", "--disable-pip-version-check",
-         "--no-warn-script-location", "--retries", "5", "--timeout", "60", *flags, *packages],
+         "--no-warn-script-location", "--retries", "3", "--timeout", "60", *flags, *packages],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        encoding="utf-8", errors="replace", timeout=1200)
+        encoding="utf-8", errors="replace", timeout=1800)
     return result.returncode == 0
 
 
@@ -337,8 +337,9 @@ def python_tools(args):
 
     version = python_minor()
 
-    def pip_tool(name, probe_arguments):
-        state = command_ok(name, probe_arguments)
+    def pip_tool(name):
+        probe, probe_arguments, _ = PIP_TOOLS[name]
+        state = command_ok(probe, (probe_arguments,))
         if state is True:
             say("installed", name, "32")
             return
@@ -354,9 +355,8 @@ def python_tools(args):
         else:
             say("failed", "{} 安装失败".format(name), "31")
 
-    pip_tool("pwntools", ("--help",))
-    pip_tool("ROPgadget", ("--version",))
-    pip_tool("ropper", ("--version",))
+    for name in PIP_TOOLS:
+        pip_tool(name)
 
     pwn = shutil.which("pwn", path=SYSTEM_PATH)
     if pwn is None:
