@@ -82,6 +82,25 @@ class Lab:
         print("FirmAE pinned source and container image ready: " + self.image)
         return 0
 
+    def status(self):
+        """Machine-readable readiness: 0 ready, 3 pending, 1 broken.
+
+        `check` treats a missing image as an error for a human who asked for a
+        working lab. An installer needs the distinction instead: an image that
+        has not been built yet is a deferred step, not a broken environment.
+        """
+        if not self.source_ready():
+            print("source: missing or not at the pinned revision")
+            return 1
+        if not self.connect():
+            print("runtime: pending (Docker daemon unavailable)")
+            return 3
+        if not self.image_ready():
+            print("image: pending (run firmae build)")
+            return 3
+        print("ready: " + self.image)
+        return 0
+
     def build(self, if_available=False):
         if platform.machine().lower() not in ("x86_64", "amd64"):
             raise RuntimeError("This FirmAE image requires an x86_64 Linux host.")
@@ -195,7 +214,7 @@ class Lab:
 def main(argv=None):
     parser = argparse.ArgumentParser(description="FirmAE emulation/debug lab (iot-help for examples)")
     parser.add_argument("command", nargs="?", default="help",
-                        choices=("help", "build", "check", "doctor", "start", "stop", "recreate",
+                        choices=("help", "build", "check", "status", "doctor", "start", "stop", "recreate",
                                  "shell", "logs", "web", "-c", "-r", "-d", "-b"))
     parser.add_argument("arguments", nargs="*")
     parser.add_argument("--if-available", action="store_true", help=argparse.SUPPRESS)
@@ -212,6 +231,8 @@ def main(argv=None):
         return lab.build(args.if_available)
     if args.command == "check":
         return lab.check()
+    if args.command == "status":
+        return lab.status()
     if args.command == "doctor":
         return lab.doctor()
     if args.command == "start":

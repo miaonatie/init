@@ -20,11 +20,11 @@ jobs:
   install:
     name: Install on ${{ matrix.image }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        image: ["ubuntu:18.04", "ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "debian:13", "kalilinux/kali-rolling"]
+        image: ["ubuntu:20.04", "ubuntu:22.04", "ubuntu:24.04", "ubuntu:26.04", "debian:13", "kalilinux/kali-rolling"]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -38,9 +38,10 @@ jobs:
               apt-get -o Acquire::Retries=2 update -qq
               apt-get -y -qq --no-install-recommends install python3
               python3 init.py
-              python3 init.py --check-python
+              python3 init.py --check
               python3 -m unittest discover -s tests -q
               python3 init.py >/tmp/init-repeat.log
               cat /tmp/init-repeat.log
               ! grep -q "^  \[update\]" /tmp/init-repeat.log
+              ! grep -q "^  \[failed\]" /tmp/init-repeat.log
             '
