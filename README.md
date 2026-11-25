@@ -1,4 +1,6 @@
-## 安装
+# init
+
+CTF 环境一键搭建，Debian 系（Ubuntu / Debian / Kali）。
 
 ```bash
 git clone https://github.com/miaonatie/init.git
@@ -6,92 +8,110 @@ cd init
 /usr/bin/python3 init.py
 ```
 
-脚本通过 APT 安装系统 Python 与全部库，并把 CTF 工具链补齐到系统路径。装完用
-`/usr/bin/python3 init.py --check` 复核，`--check-python` 只核对解释器和库。
+## 就这一个命令
 
-## 分层
+装完即用。不建 venv，不升级，不删包，可以反复跑——第二次运行十几秒、零下载。
 
-| 阶段 | 内容 |
+```bash
+python3 init.py            # 安装 + 验证
+python3 init.py --check    # 只验证，什么都不改
+```
+
+只有两个用法，没有别的参数。
+
+## 做什么
+
+三段，每段都打印装了什么：
+
+1. **环境** — 确认是 Linux + APT，打印发行版和系统 Python
+2. **安装** — 159 个 APT 包，分 5 组；再补 APT 没有的 Python 工具
+3. **验证** — 逐个 `import`、逐个启动命令、跑一次 `firmae status`
+
+分组和内容：
+
+| 组 | 内容 |
 | --- | --- |
-| 1/4 环境检查 | 确认 Linux + APT + `dpkg-query`，打印发行版与系统 Python 路径 |
-| 2/4 系统基础 | 系统 Python、`python3-dev`、常用 Python 库、shell/网络诊断工具 |
-| 3/4 实验工具 | 编译链、语言运行时、二进制调试、Pwn 与利用、取证与解包 |
-| 4/4 验证 | 逐个 `import` 已装库、逐个启动 CLI、编译并运行一个 C 程序 |
+| 系统 Python | `python3` + 29 个库（pyelftools / zstandard / gmpy2 / capstone / unicorn / z3 / pycryptodome …） |
+| 日常工具 | git curl vim tmux zsh bat fd rg fzf jq yq dig tcpdump … |
+| 编译与语言 | build-essential clang cmake ninja perl ruby java node go rust |
+| 二进制与调试 | gdb / gdb-multiarch / gdbserver xxd patchelf nasm valgrind qemu-user radare2 socat netcat |
+| Pwn 与取证 | pwntools ropgadget checksec binwalk apktool steghide sleuthkit ffmpeg tesseract 7zip squashfs-tools … |
 
-第 3 阶段之后还有两组独立动作：**Python CTF 工具**（APT 缺的用 pip 补、给 pwn 补子命令）
-和 **IoT 固件实验台**（把 `iot/` 资产装到 `~/.local/share/init/iot` 并写好 `firmae`/
-`iot-help` 启动器）。
+## Python 从哪来
 
-## Python 来源策略
+**库只走 APT，解释器只 `/usr/bin/python3`。** APT 没打包的才用 pip，就一个 `ropper`。
 
-1. 库一律走 APT（`python3-*`），解释器固定 `/usr/bin/python3`，不建 venv。
-2. 命令行工具优先 APT：`python3-pwntools`、`python3-ropgadget`。
-3. APT 没打包的（`ropper`，以及 24.04 之前发行版里的 `pwntools`/`ROPgadget`）才用 pip，
-   且要求 Python ≥ 3.8；低于 3.8 记为 `skipped` 而不是失败。
-4. 遇到 PEP 668（`EXTERNALLY-MANAGED`）自动追加 `--break-system-packages`。
-5. Python 3.14 的 `ast.Str` 已被移除，`ropper` 依赖的 `filebytes` 需要上游补丁；
-   脚本按 `python_version >= '3.14'` 条件注入该补丁地址。
-6. APT 版 pwntools 只带 `/usr/bin/pwn`，不装 `checksec`/`cyclic`/`asm`/`disasm`/
-   `shellcraft`。脚本在 `/usr/local/bin` 生成薄壳包装，并统一置 `PWNLIB_NOTERM=1`，
-   避免无 terminfo 的环境（容器、CI）在导入时打印 curses 告警。
+三条实测出来的处理：
+
+- **Python ≥ 3.8 才用 pip**。更低版本直接报 `skipped`，不制造半装状态。
+- **PEP 668 自动加 `--break-system-packages`**。24.04 / Debian 13 / Kali 都有 `EXTERNALLY-MANAGED` 标记。
+- **Python 3.14 注入 filebytes 补丁**。`ropper` 依赖的 `filebytes` 用了已移除的 `ast.Str`。
 
 发行版实测（2026-11）：
 
-| 发行版 | Python | pwntools | ROPgadget | ropper |
-| --- | --- | --- | --- | --- |
-| Ubuntu 20.04 | 3.8 | pip | pip | pip |
-| Ubuntu 22.04 | 3.10 | pip | APT | pip |
-| Ubuntu 24.04 | 3.12 | APT 4.12.0 | APT 7.4 | pip |
-| Debian 13 | 3.13 | APT 4.14.1 | APT 7.6 | pip |
-| Kali rolling | 3.14 | APT 4.15.0 | APT 7.7 | pip + filebytes 补丁 |
-| Ubuntu 18.04 | 3.6 | skipped | skipped | skipped |
+| | Python | pwntools | ropper |
+| --- | --- | --- | --- |
+| Ubuntu 20.04 | 3.8 | pip | pip |
+| Ubuntu 22.04 | 3.10 | pip | pip |
+| Ubuntu 24.04 | 3.12 | APT 4.12 | pip |
+| Debian 13 | 3.13 | APT 4.14 | pip |
+| Kali | 3.14 | APT 4.15 | pip + 补丁 |
 
-## 其它动作
+## 三个容易踩的坑，脚本已经处理
+
+**`checksec` 有两个互不兼容的实现。** APT 的 `checksec.sh` 要 `--file=x`，pwntools 要裸路径。两者都装时后者会盖住前者，导致文档写法直接报错。脚本写一个调度器，两种语法都收：
 
 ```bash
-/usr/bin/python3 init.py --check        # 只验证，不安装
-/usr/bin/python3 init.py --check-python # 只验证 Python 层
-/usr/bin/python3 init.py --doctor       # 诊断已有环境，什么都不改
-/usr/bin/python3 init.py --iot          # 只安装/修复 IoT 固件实验台
-/usr/bin/python3 init.py --iot-check    # 只验证 IoT 层
-/usr/bin/python3 init.py --help         # 帮助
+checksec --file=/bin/true    # APT 完整表格
+checksec /bin/true           # pwntools 精简表
 ```
 
-`--doctor` 检查的是包清单看不出来的问题：命令是否只靠 Windows PATH 解析、
-一个名字是否存在多个实现、pip 副本是否盖住更新的 APT 副本、shell 启动耗时。
-每条给出可执行建议。
+**APT 的 pwntools 只给 `/usr/bin/pwn`。** `checksec`/`cyclic`/`asm`/`disasm`/`shellcraft` 全缺。脚本在 `/usr/local/bin` 补 5 个薄壳。
 
-## 同名命令的归属
+**没有 terminfo 的环境导入 pwn 会打印 curses 告警**（容器、CI 常见）。所有包装统一置 `PWNLIB_NOTERM=1`。
 
-同一个命令有多个实现时，"哪个胜出"决定行为，所以这里写明取舍：
+## 固件工具
 
-| 命令 | 谁胜出 | 为什么 |
-| --- | --- | --- |
-| `checksec` | `/usr/local/bin/checksec` 调度器 | APT 的 `checksec.sh` 要 `--file=x`，pwntools 要裸路径；调度器两种都收 |
-| `pwn` / `ROPgadget` / `ropper` | `/usr/local/bin` 包装 | 置 `PWNLIB_NOTERM=1`，避免无 terminfo 时打印 curses 告警 |
-| `r2` / `radare2` | `/usr/local/bin`（源码 6.2.1） | 比 APT 的 6.0.5 新 |
-| `node` / `python3` / `git` | `/usr/bin`（APT） | Linux 原生，不依赖 WSL interop |
+`iot/` 的四份文件会装到 `~/.local/share/init/iot`，并写好 `firmae` / `iot-help` 两个命令。**不自动构建镜像**——那要几百 MB 和几分钟，等你真要用的时候：
 
-## 已知的、不该"修"的现象
+```bash
+firmae build                  # 构建镜像（一次）
+firmae -c dlink ./firmware.bin
+firmae web 192.168.0.1        # 浏览器开 http://127.0.0.1:18080
+iot-help                      # 速查表
+```
 
-`--doctor` 会报告两条 warn，它们都是环境事实而不是故障：
+`firmae status` 看状态：`ready` / `pending`（镜像没建）/ `broken`。未构建只报 `pending`，不算失败。
 
-**1. pip 副本盖住更新的 APT 副本（19 个模块）。**
-`/usr/local/lib` 在 `sys.path` 里排在 `/usr/lib` 之前，而 Kali 上的 pip 工具
-（netexec、impacket、wfuzz、unblob）钉死了较旧版本，例如 `sqlalchemy 1.3.22`
-盖住 APT 的 `2.0.48`。这些是那些工具的依赖要求，**删掉会破坏它们**。
-要判断影响范围看 `pip show <name> | grep Required-by`。
+需要 x86_64 Linux + Docker + TUN + loop 设备；不满足时 `firmae doctor` 会说。
 
-**2. 交互式 shell 启动约 1.1 秒。**
-实测拆解：裸 `zsh -f` 10 ms，oh-my-zsh 约 1 秒。`ZSH_DISABLE_COMPFIX=true`
-**无效**——在同一个进程里 `compinit -u` 和 `-C` 都是 0 ms，成本来自进程启动后加载
-约 1200 个补全函数。只有精简插件或弃用 oh-my-zsh 才能改变，属于框架成本。
+## 不装的东西
 
-## 行为约束
+- **不建 venv**，不装 pyenv/uv。系统 Python 就够。
+- **不做源码编译**，不装 r2ghidra。radare2 用发行版的。
+- **不装 pwndbg**。要的话 `pip install pwndbg` 或看官方 uv 安装方式。
+- **不碰 nvm/rustup**。node/rust 用 APT 的，不劫持 PATH。
 
+## 已知不修的
 
-- 只安装，不删除、不 `upgrade`、不 `autoremove`，可重复执行。
-- 二次运行不应触发 `[update]`：`refresh_index` 只看本次真正要装的层，已装的层不再刷新索引。
-- 可选包缺失报 `skipped` 并继续；必需项失败才返回非零。
-- 验证失败时不动 `~/.bashrc`/`~/.zshrc`；成功后才清理旧的 `init Python tools` 激活块，
-  并把 nvm 设为 `--no-use`、rustup 换成不抢 PATH 的写法，让系统运行时优先。
+**Kali 上 pip 旧版会盖住更新的 APT 版（19 个模块）**，比如 `sqlalchemy 1.3.22` 盖住 `2.0.48`。这不是故障：
+
+```
+$ pip show sqlalchemy | grep Required-by
+Required-by: alembic, netexec, SQLAlchemy-Utc
+```
+
+netexec / impacket / wfuzz 钉死了旧版，删了会坏。查影响范围用 `pip show <名> | grep Required-by`。
+
+**交互式 zsh 启动约 1.1 秒**，是 oh-my-zsh 加载 ~1200 个补全函数。试过 `ZSH_DISABLE_COMPFIX=true`，无效——同一进程内 `compinit` 任何参数都是 0 ms。只有精简插件才有用。
+
+## 验证
+
+```bash
+python3 -m unittest discover -s tests    # 30 项，0.15 秒，不联网
+```
+
+CI 在 6 个镜像上跑完整流程：`init.py` → `--check` → 单测 → 再跑一次，并断言第二次既无 `[update]` 也无 `[failed]`。
+
+镜像矩阵：ubuntu 20.04 / 22.04 / 24.04 / 26.04、debian 13、kali-rolling。
+Ubuntu 18.04（Python 3.6）不支持：pip 装 pwntools 时 `psutil` 编译失败，APT 也没有该包。
